@@ -108,7 +108,9 @@ DB_URL = resolve_db_url()
 @st.cache_resource
 def _engine_for(url: str):
     # Keyed by URL: a changed secret gets a fresh engine instead of the cached one.
-    return db.get_engine(url)
+    # No create_all: the dashboard connects read-only; the collector owns the schema.
+    # (Demo SQLite is created by `python -m tracker demo`.)
+    return db.get_engine(url, create_tables=False)
 
 
 
@@ -137,19 +139,25 @@ def q_owners(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
     return analysis.load_owners(_engine_for(url), list(appids))
 
 
+def _missing_tables(exc: Exception) -> bool:
+    # Postgres: UndefinedTable (ProgrammingError); SQLite: "no such table" (OperationalError)
+    return isinstance(exc, sqlalchemy.exc.ProgrammingError) or "no such table" in str(exc)
+
+
 try:
     games = q_games(DB_URL)
-except sqlalchemy.exc.OperationalError:
-    # Details (which can include the host) go to the server log, not the public page.
-    import logging
-    logging.getLogger("dashboard").exception("Database connection failed")
-    st.title("Steam Market Tracker")
-    st.error(
-        "**Can't connect to the database.** Check the `DATABASE_URL` secret "
-        "(Streamlit Cloud: Manage app → Settings → Secrets). If you just changed it, "
-        "wait a minute and reload. Full error: Manage app → logs."
-    )
-    st.stop()
+except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError) as exc:
+    if not _missing_tables(exc):
+        # Details (which can include the host) go to the server log, not the public page.
+        import logging
+        logging.getLogger("dashboard").exception("Database connection failed")
+        st.error(
+            "**Can't connect to the database.** Check the `DATABASE_URL` secret "
+            "(Streamlit Cloud: Manage app → Settings → Secrets). If you just changed it, "
+            "wait a minute and reload. Full error: Manage app → logs."
+        )
+        st.stop()
+    games = pd.DataFrame()  # reachable, but no tables yet: show "No data yet"
 if games.empty:
     st.title("Steam Market Tracker")
     st.info("No data yet. Run `python -m tracker collect` (or `python -m tracker demo` and "

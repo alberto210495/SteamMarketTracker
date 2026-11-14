@@ -112,10 +112,12 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def get_engine(url: str | None = None) -> Engine:
+def get_engine(url: str | None = None, create_tables: bool = True) -> Engine:
+    """create_tables=False for read-only clients (the dashboard's role can't run DDL)."""
     url = url or config.database_url()
     engine = create_engine(url, future=True, pool_pre_ping=True)
-    metadata.create_all(engine)
+    if create_tables:
+        metadata.create_all(engine)
     return engine
 
 
