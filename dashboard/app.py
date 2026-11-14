@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import sqlalchemy.exc
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -76,6 +77,8 @@ def hex_rgba(hex_color: str, alpha: float) -> str:
 
 
 # --------------------------------------------------------------------------- data
+# Every cached query takes the URL as an argument, so changing the secret
+# invalidates both the engine and the cached results.
 
 def _secret_db_url() -> str | None:
     """Streamlit Community Cloud passes credentials via st.secrets, not env vars."""
@@ -85,44 +88,68 @@ def _secret_db_url() -> str | None:
         return None
 
 
-if not os.environ.get("DATABASE_URL") and _secret_db_url():
-    os.environ["DATABASE_URL"] = _secret_db_url()
-
 DEMO = "--demo" in sys.argv
-DB_URL = f"sqlite:///{(config.ROOT / 'data' / 'demo.db').as_posix()}" if DEMO else config.database_url()
+
+
+def resolve_db_url() -> str:
+    """Re-read on every rerun so an edited secret takes effect without a reboot.
+    st.secrets wins over a DATABASE_URL env var left over from an earlier run."""
+    if DEMO:
+        return f"sqlite:///{(config.ROOT / 'data' / 'demo.db').as_posix()}"
+    secret = _secret_db_url()
+    if secret:
+        os.environ["DATABASE_URL"] = secret  # config.database_url() normalizes the driver prefix
+    return config.database_url()
+
+
+DB_URL = resolve_db_url()
 
 
 @st.cache_resource
-def engine():
-    return db.get_engine(DB_URL)
+def _engine_for(url: str):
+    # Keyed by URL: a changed secret gets a fresh engine instead of the cached one.
+    return db.get_engine(url)
 
-
-@st.cache_data(ttl=300)
-def q_games() -> pd.DataFrame:
-    return analysis.load_games(engine())
 
 
 @st.cache_data(ttl=300)
-def q_players(appids: tuple[int, ...]) -> pd.DataFrame:
-    return analysis.load_players(engine(), list(appids))
+def q_games(url: str) -> pd.DataFrame:
+    return analysis.load_games(_engine_for(url))
 
 
 @st.cache_data(ttl=300)
-def q_prices(appids: tuple[int, ...]) -> pd.DataFrame:
-    return analysis.load_prices(engine(), list(appids))
+def q_players(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_players(_engine_for(url), list(appids))
 
 
 @st.cache_data(ttl=300)
-def q_events(appids: tuple[int, ...]) -> pd.DataFrame:
-    return analysis.load_events(engine(), list(appids))
+def q_prices(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_prices(_engine_for(url), list(appids))
 
 
 @st.cache_data(ttl=300)
-def q_owners(appids: tuple[int, ...]) -> pd.DataFrame:
-    return analysis.load_owners(engine(), list(appids))
+def q_events(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_events(_engine_for(url), list(appids))
 
 
-games = q_games()
+@st.cache_data(ttl=300)
+def q_owners(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_owners(_engine_for(url), list(appids))
+
+
+try:
+    games = q_games(DB_URL)
+except sqlalchemy.exc.OperationalError:
+    # Details (which can include the host) go to the server log, not the public page.
+    import logging
+    logging.getLogger("dashboard").exception("Database connection failed")
+    st.title("Steam Market Tracker")
+    st.error(
+        "**Can't connect to the database.** Check the `DATABASE_URL` secret "
+        "(Streamlit Cloud: Manage app → Settings → Secrets). If you just changed it, "
+        "wait a minute and reload. Full error: Manage app → logs."
+    )
+    st.stop()
 if games.empty:
     st.title("Steam Market Tracker")
     st.info("No data yet. Run `python -m tracker collect` (or `python -m tracker demo` and "
@@ -139,7 +166,7 @@ with st.sidebar:
     st.header("Filters")
     if DEMO:
         st.warning("Showing **synthetic demo data**.")
-    all_players = q_players(tuple(NAME))
+    all_players = q_players(DB_URL, tuple(NAME))
     by_size = (all_players.sort_values("ts").groupby("appid")["players"].last()
                .reindex(list(NAME)).fillna(0).sort_values(ascending=False))
     default = [a for a in by_size.index[:4]]
@@ -151,17 +178,17 @@ with st.sidebar:
                                "Daily peak smooths out the day/night cycle.")
     window = st.slider("Impact window (days each side)", 1, 14, 7)
     show_news = st.checkbox("Show non-patch announcements on charts", value=False)
-    st.caption(f"Data source: {'demo SQLite' if DEMO else engine().dialect.name}")
+    st.caption(f"Data source: {'demo SQLite' if DEMO else DB_URL.split(':', 1)[0].split('+')[0]}")
 
 if not picked:
     st.info("Pick at least one game in the sidebar.")
     st.stop()
 
 ids = tuple(sorted(int(a) for a in picked))
-players = q_players(ids)
-prices = q_prices(ids)
-events = q_events(ids)
-owners = q_owners(ids)
+players = q_players(DB_URL, ids)
+prices = q_prices(DB_URL, ids)
+events = q_events(DB_URL, ids)
+owners = q_owners(DB_URL, ids)
 
 end = players["ts"].max() if not players.empty else pd.Timestamp(db.utcnow())
 start = None if range_label == "All" else end - timedelta(days=int(range_label.split()[0]))
