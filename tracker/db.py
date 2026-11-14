@@ -96,6 +96,15 @@ events = Table(
     UniqueConstraint("appid", "kind", "source_id", name="uq_event_source"),
 )
 
+# Small key/value store for bookkeeping, e.g. which events were already alerted.
+app_state = Table(
+    "app_state",
+    metadata,
+    Column("key", String(128), primary_key=True),
+    Column("value", String(512)),
+    Column("updated_at", DateTime),
+)
+
 EVENT_KINDS = ("sale_start", "sale_end", "sale_change", "price_change", "patch", "announcement", "manual")
 
 
@@ -160,6 +169,15 @@ def latest_price(engine: Engine, appid: int, country: str) -> dict[str, Any] | N
 def game_rows(engine: Engine) -> dict[int, dict[str, Any]]:
     with engine.connect() as conn:
         return {r["appid"]: dict(r) for r in conn.execute(select(games)).mappings()}
+
+
+def get_state(engine: Engine, key: str) -> str | None:
+    with engine.connect() as conn:
+        return conn.execute(select(app_state.c.value).where(app_state.c.key == key)).scalar()
+
+
+def set_state(engine: Engine, key: str, value: str) -> None:
+    upsert(engine, app_state, [{"key": key, "value": value, "updated_at": utcnow()}], ["key"])
 
 
 def copy_database(src: Engine, dst: Engine, chunk: int = 2000) -> dict[str, int]:

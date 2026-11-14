@@ -78,6 +78,18 @@ def _cmd_demo(args) -> int:
     return 0
 
 
+def _cmd_test_alert(args) -> int:
+    from . import alerts
+
+    url = config.discord_webhook_url()
+    if not url:
+        print("DISCORD_WEBHOOK_URL is not set.", file=sys.stderr)
+        return 2
+    ok = alerts.send_test(alerts.discord_sender(url))
+    print("Test alert sent." if ok else "Discord rejected the test alert (check the webhook URL).")
+    return 0 if ok else 1
+
+
 def _cmd_migrate(args) -> int:
     src_url = args.source or f"sqlite:///{config.DEFAULT_DB_PATH.as_posix()}"
     dst_url = args.to or config.database_url()
@@ -111,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("appid", type=int)
     r.add_argument("--days", type=int, default=7, help="window on each side of the event")
     r.set_defaults(func=_cmd_report)
+
+    t = sub.add_parser("test-alert", help="send a test message to DISCORD_WEBHOOK_URL")
+    t.set_defaults(func=_cmd_test_alert)
 
     m = sub.add_parser("migrate", help="copy all data from one database to another (e.g. SQLite -> PostgreSQL)")
     m.add_argument("--from", dest="source", help="source URL (default: data/steam.db)")

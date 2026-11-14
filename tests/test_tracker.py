@@ -233,3 +233,130 @@ def test_copy_database_is_complete_and_rerunnable(tmp_path, engine):
     # destination still accepts new events (its id sequence wasn't disturbed)
     db.insert_ignore(dst, db.events, [{"appid": 1, "ts": datetime(2026, 1, 1), "kind": "manual",
                                        "title": "x", "url": None, "detail": "{}", "source_id": "new"}])
+
+
+# --------------------------------------------------------------------------- alerts
+
+from tracker import alerts as alerts_mod  # noqa: E402
+from tracker.config import AlertsConfig  # noqa: E402
+
+
+class FakeSender:
+    def __init__(self, ok=True):
+        self.ok, self.calls = ok, []
+
+    def __call__(self, embeds):
+        self.calls.append(embeds)
+        return self.ok
+
+    @property
+    def titles(self):
+        return [e["title"] for call in self.calls for e in call]
+
+
+def _seed_game(engine, appid=1, name="Game 1"):
+    db.upsert(engine, db.games, [{"appid": appid, "name": name}], ["appid"])
+
+
+def _event(engine, appid, ts, kind, title, source):
+    db.insert_ignore(engine, db.events, [{"appid": appid, "ts": ts, "kind": kind, "title": title,
+                                           "url": None, "detail": "{}", "source_id": source}])
+
+
+NO_EXTRAS = AlertsConfig(spikes=False, daily_summary=False)
+
+
+def test_first_alert_run_does_not_flood_then_sends_only_new_events(engine):
+    now = datetime(2026, 3, 1, 12)
+    _seed_game(engine)
+    _event(engine, 1, now - timedelta(hours=3), "patch", "Old patch", "a")
+    send = FakeSender()
+    alerts_mod.process(engine, NO_EXTRAS, [1], send, now=now)
+    assert send.calls == []  # first run only initialises the cursor
+
+    _event(engine, 1, now, "sale_start", "50% off", "b")
+    _event(engine, 1, now, "announcement", "Tournament!", "c")       # not an alert kind
+    _event(engine, 1, now - timedelta(days=30), "patch", "Ancient", "d")  # too old to announce
+    alerts_mod.process(engine, NO_EXTRAS, [1], send, now=now)
+    assert send.titles == ["On sale: Game 1"]
+
+    alerts_mod.process(engine, NO_EXTRAS, [1], send, now=now)  # nothing new -> nothing sent
+    assert len(send.calls) == 1
+
+
+def test_failed_send_is_retried_next_run(engine):
+    now = datetime(2026, 3, 1, 12)
+    _seed_game(engine)
+    _event(engine, 1, now, "patch", "seed", "a")
+    alerts_mod.process(engine, NO_EXTRAS, [1], FakeSender(), now=now)  # init cursor
+    _event(engine, 1, now, "patch", "Patch 1.1", "b")
+    alerts_mod.process(engine, NO_EXTRAS, [1], FakeSender(ok=False), now=now)
+    retry = FakeSender()
+    alerts_mod.process(engine, NO_EXTRAS, [1], retry, now=now)
+    assert retry.titles == ["New patch: Game 1"]
+
+
+def test_disabled_kinds_are_skipped(engine):
+    now = datetime(2026, 3, 1, 12)
+    _seed_game(engine)
+    _event(engine, 1, now, "patch", "seed", "a")
+    cfg = AlertsConfig(sales=False, spikes=False, daily_summary=False)
+    alerts_mod.process(engine, cfg, [1], FakeSender(), now=now)
+    _event(engine, 1, now, "sale_start", "50% off", "b")
+    _event(engine, 1, now, "patch", "Patch 2", "c")
+    send = FakeSender()
+    alerts_mod.process(engine, cfg, [1], send, now=now)
+    assert send.titles == ["New patch: Game 1"]
+
+
+@pytest.mark.parametrize("latest,history,expected", [
+    (3000, [1000] * 7, 1000),       # 3x usual -> spike
+    (1300, [1000] * 7, None),       # 1.3x -> no
+    (299, [100] * 7, None),         # ~3x but only +199 (needs at least +200)
+    (300, [100] * 7, 100),          # exactly +200 -> spike
+    (5000, [1000] * 3, None),       # not enough history
+])
+def test_detect_spike(latest, history, expected):
+    assert alerts_mod.detect_spike(latest, history, AlertsConfig()) == expected
+
+
+def test_spike_alert_with_cooldown(engine):
+    now = datetime(2026, 3, 15, 20)
+    _seed_game(engine)
+    rows = [{"appid": 1, "ts": now - timedelta(days=d), "players": 1000} for d in range(1, 10)]
+    rows.append({"appid": 1, "ts": now, "players": 4000})
+    db.insert_ignore(engine, db.player_snapshots, rows)
+    cfg = AlertsConfig(sales=False, patches=False, daily_summary=False)
+    send = FakeSender()
+    alerts_mod.process(engine, cfg, [1], send, now=now)
+    assert send.titles == ["Player spike: Game 1"]
+    alerts_mod.process(engine, cfg, [1], send, now=now + timedelta(hours=1))  # cooldown
+    assert len(send.calls) == 1
+
+
+def test_daily_summary_once_per_day_after_hour(engine):
+    _seed_game(engine)
+    base = datetime(2026, 3, 1, 0)
+    db.insert_ignore(engine, db.player_snapshots,
+                     [{"appid": 1, "ts": base + timedelta(hours=h), "players": 100 + h} for h in range(40)])
+    cfg = AlertsConfig(sales=False, patches=False, spikes=False, daily_summary_hour_utc=14)
+    send = FakeSender()
+    alerts_mod.process(engine, cfg, [1], send, now=datetime(2026, 3, 2, 13))   # before the hour
+    assert send.calls == []
+    alerts_mod.process(engine, cfg, [1], send, now=datetime(2026, 3, 2, 15))
+    alerts_mod.process(engine, cfg, [1], send, now=datetime(2026, 3, 2, 16))   # same day again
+    assert len(send.calls) == 1 and send.titles[0].startswith("Daily summary")
+    assert "Game 1" in send.calls[0][0]["description"]
+
+
+def test_collect_run_triggers_alerts(engine, monkeypatch):
+    t0 = datetime(2026, 1, 1, 10)
+    monkeypatch.setattr(db, "utcnow", lambda: t0)
+    client, games = FakeClient(), config.GamesConfig(country="us", appids=[1],
+                                                       alerts=AlertsConfig(spikes=False, daily_summary=False))
+    send = FakeSender()
+    collect.run(engine=engine, client=client, games=games, send_alerts=send)   # init
+    client.discount = 50
+    monkeypatch.setattr(db, "utcnow", lambda: t0 + timedelta(hours=1))
+    collect.run(engine=engine, client=client, games=games, send_alerts=send)
+    assert send.titles == ["On sale: Game 1"]

@@ -18,7 +18,7 @@ from .steam import PriceInfo, SteamClient, classify_news, parse_owner_range, uni
 log = logging.getLogger(__name__)
 
 METADATA_MAX_AGE = timedelta(days=7)
-ALL_STEPS = ("metadata", "players", "prices", "news", "owners")
+ALL_STEPS = ("metadata", "players", "prices", "news", "owners", "alerts")  # alerts run last
 
 
 @dataclass
@@ -185,7 +185,10 @@ def collect_owners(engine: Engine, client: SteamClient, appids: list[int], ts: d
 
 
 def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
-        client: SteamClient | None = None, games: config.GamesConfig | None = None) -> RunStats:
+        client: SteamClient | None = None, games: config.GamesConfig | None = None,
+        send_alerts=None) -> RunStats:
+    """`send_alerts` overrides the Discord sender (tests); by default alerts go to
+    DISCORD_WEBHOOK_URL when it's set and are skipped otherwise."""
     engine = engine or db.get_engine()
     client = client or SteamClient(config.steam_api_key())
     games = games or config.load_games()
@@ -203,7 +206,7 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         "owners": lambda: collect_owners(engine, client, appids, ts, stats),
     }
     for step in ALL_STEPS:
-        if step not in steps:
+        if step not in steps or step not in step_fns:
             continue
         try:
             step_fns[step]()
@@ -213,4 +216,16 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
     log.info("Done: %s", stats.summary())
     if stats.failures:
         log.warning("Failures: %s", ", ".join(stats.failures))
+
+    if "alerts" in steps:
+        webhook = config.discord_webhook_url()
+        if send_alerts is None and webhook:
+            from .alerts import discord_sender
+            send_alerts = discord_sender(webhook)
+        if send_alerts is not None:
+            from . import alerts
+            try:  # alerts must never fail the collection run
+                alerts.process(engine, games.alerts, appids, send_alerts, now=db.utcnow())
+            except Exception:
+                log.exception("Alerts failed")
     return stats

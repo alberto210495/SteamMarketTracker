@@ -36,6 +36,23 @@ def steam_api_key() -> str | None:
 class GamesConfig:
     country: str = "us"
     appids: list[int] = field(default_factory=list)
+    alerts: "AlertsConfig" = field(default_factory=lambda: AlertsConfig())
+
+
+@dataclass
+class AlertsConfig:
+    """[alerts] in games.toml. Alerts only go out when DISCORD_WEBHOOK_URL is set."""
+    sales: bool = True              # sale start / end / discount change / base price change
+    patches: bool = True            # new patch notes on Steam
+    spikes: bool = True             # players well above the usual level for that hour
+    spike_ratio: float = 1.5        # ... at least this many times the usual level
+    spike_min_increase: int = 200   # ... and at least this many extra players
+    daily_summary: bool = True
+    daily_summary_hour_utc: int = 14
+
+
+def discord_webhook_url() -> str | None:
+    return os.environ.get("DISCORD_WEBHOOK_URL", "").strip() or None
 
 
 def load_games(path: Path | None = None) -> GamesConfig:
@@ -46,4 +63,6 @@ def load_games(path: Path | None = None) -> GamesConfig:
     # de-duplicate, keep order
     seen: set[int] = set()
     appids = [a for a in appids if not (a in seen or seen.add(a))]
-    return GamesConfig(country=str(raw.get("country", "us")).lower(), appids=appids)
+    known = AlertsConfig.__dataclass_fields__
+    alerts = AlertsConfig(**{k: v for k, v in (raw.get("alerts") or {}).items() if k in known})
+    return GamesConfig(country=str(raw.get("country", "us")).lower(), appids=appids, alerts=alerts)

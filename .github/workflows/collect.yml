@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "7 * * * *"   # hourly, at :07 (top of the hour is the busiest slot on Actions)
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Send a test message to Discord before collecting"
+        type: boolean
+        default: false
 
 # Never let two runs write the database at once.
 concurrency:
@@ -21,6 +26,7 @@ jobs:
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}   # Neon PostgreSQL connection string
       STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }} # optional
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}  # optional: alerts
     steps:
       - name: Require DATABASE_URL
         if: env.DATABASE_URL == ''
@@ -37,6 +43,10 @@ jobs:
           cache-dependency-path: requirements-worker.txt
 
       - run: pip install -r requirements-worker.txt
+
+      - name: Test Discord alert
+        if: inputs.test_alert
+        run: python -m tracker test-alert
 
       - name: Collect
         run: python -m tracker collect

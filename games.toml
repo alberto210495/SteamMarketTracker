@@ -4,6 +4,16 @@
 # country: storefront region used for prices (ISO 3166 code, e.g. us, gb, de, br)
 country = "us"
 
+# Discord alerts (sent only when the DISCORD_WEBHOOK_URL secret is set).
+[alerts]
+sales = true                  # sale started / ended / discount changed / base price changed
+patches = true                # new patch notes posted on Steam
+spikes = true                 # players far above the usual level for that hour of day
+spike_ratio = 1.5             # ...at least 1.5x the usual level
+spike_min_increase = 200      # ...and at least 200 more players than usual
+daily_summary = true
+daily_summary_hour_utc = 14   # 14:00 UTC = 8:00 in Central time (CST)
+
 [[games]]
 appid = 730
 note = "Counter-Strike 2"

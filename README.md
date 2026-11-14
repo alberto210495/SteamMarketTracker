@@ -54,6 +54,25 @@ No API key is required. If you set `STEAM_API_KEY` it is sent with Web API calls
 
 Requests are rate-limited (storefront ~1 req/1.6 s, SteamSpy 1 req/s) and retried with backoff on 429/5xx.
 
+### Discord alerts
+
+Add a repository secret `DISCORD_WEBHOOK_URL` (Discord: Server Settings → Integrations → Webhooks) and each
+collection run posts:
+
+| Alert | When |
+|---|---|
+| Sale | a tracked game goes on sale, the sale ends, the discount changes, or the base price changes |
+| Patch | new patch notes appear on Steam |
+| Player spike | players are ≥1.5× (and ≥200 above) the median for that hour of day over the last 14 days; at most one per game per 24h. Needs ~5 days of history to start. |
+| Daily summary | once a day, first run after 14:00 UTC: each game's 24h peak, change vs. the day before, current price |
+
+Toggle each one and tune thresholds under `[alerts]` in [games.toml](games.toml). The first run with alerts
+enabled sends nothing for events already in the database. If Discord is unreachable, the alerts are retried on the
+next run.
+
+Check the webhook: **Actions → Collect Steam data → Run workflow**, tick *Send a test message to Discord*.
+Locally: `python -m tracker test-alert` with `DISCORD_WEBHOOK_URL` set.
+
 ### Annotating events yourself
 
 Some games name their big updates in ways the classifier won't spot (Rust's monthly updates, for example), and
