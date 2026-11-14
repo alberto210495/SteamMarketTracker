@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -111,7 +112,21 @@ class FakeClient:
 
 @pytest.fixture
 def engine(tmp_path):
-    return db.get_engine(f"sqlite:///{(tmp_path / 't.db').as_posix()}")
+    """SQLite by default; set TEST_DATABASE_URL to run the same tests on PostgreSQL.
+
+    The Postgres database is wiped before and after each test - never point
+    this at real data.
+    """
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        yield db.get_engine(f"sqlite:///{(tmp_path / 't.db').as_posix()}")
+        return
+    eng = db.get_engine(url)
+    db.metadata.drop_all(eng)
+    db.metadata.create_all(eng)
+    yield eng
+    db.metadata.drop_all(eng)
+    eng.dispose()
 
 
 def test_collect_run_idempotent_and_detects_sale(engine, monkeypatch):
@@ -202,10 +217,11 @@ def test_with_gaps_inserts_break_only_in_long_gaps():
     assert out["players"].dropna().tolist() == [1, 2, 3, 4, 5]
 
 
-def test_copy_database_is_complete_and_rerunnable(tmp_path):
+def test_copy_database_is_complete_and_rerunnable(tmp_path, engine):
+    """SQLite -> `engine` (another SQLite file, or PostgreSQL when TEST_DATABASE_URL is set)."""
     from tracker import demo
     src = db.get_engine(f"sqlite:///{(tmp_path / 'src.db').as_posix()}")
-    dst = db.get_engine(f"sqlite:///{(tmp_path / 'dst.db').as_posix()}")
+    dst = engine
     demo.generate(src, days=30)
     first = db.copy_database(src, dst)
     db.copy_database(src, dst)  # second run must not duplicate or fail
