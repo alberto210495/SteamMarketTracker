@@ -113,6 +113,24 @@ streamlit run dashboard/app.py
 Tables are created automatically. The same code runs on both databases (SQLAlchemy Core with
 `ON CONFLICT DO NOTHING` upserts).
 
+To move existing SQLite data into Postgres (safe to re-run; rows already there are skipped):
+
+```bash
+python -m tracker migrate --to "postgresql://user:pass@host/db"
+```
+
+## Hosting the dashboard (Streamlit Community Cloud)
+
+1. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub → **Create app** → pick this repo,
+   branch `main`, main file `dashboard/app.py`.
+2. **Advanced settings → Secrets**:
+   ```toml
+   DATABASE_URL = "postgresql://user:pass@host/db"
+   ```
+3. Deploy. The app reads the same database the hourly job writes to; queries are cached for 5 minutes.
+
+For local runs you can put the same line in `.streamlit/secrets.toml` (git-ignored) instead of an env var.
+
 ## Project layout
 
 ```

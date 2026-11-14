@@ -85,13 +85,14 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
 
         owners = []
         low = rng.choice([500_000, 1_000_000, 2_000_000])
+        neg_ratio = rng.uniform(0.06, 0.15)
         for d in range(days + 1):
             day = (start + timedelta(days=d)).date()
             if d and d % 30 == 0 and rng.random() < 0.5:
                 low *= 2
             pos = int(base * 3 + d * base * 0.02)
             owners.append({"appid": appid, "date": day, "owners_low": low, "owners_high": low * 2,
-                           "ccu": int(base * 1.1), "positive": pos, "negative": int(pos * rng.uniform(0.06, 0.15)),
+                           "ccu": int(base * 1.1), "positive": pos, "negative": int(pos * (neg_ratio + d * rng.uniform(-0.0002, 0.0004))),
                            "avg_playtime_min": 1200 + d * 3, "median_playtime_min": 600 + d})
 
         db.insert_ignore(engine, db.player_snapshots, players)

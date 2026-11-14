@@ -91,6 +91,27 @@ def resample_players(players: pd.DataFrame, how: str) -> pd.DataFrame:
     return out
 
 
+def with_gaps(df: pd.DataFrame, value_cols: list[str], max_gap: timedelta) -> pd.DataFrame:
+    """Insert an all-NaN row inside every gap longer than `max_gap` (per game).
+
+    Plotly breaks a line at NaN, so missed collection runs show up as a visible
+    hole instead of a straight line that looks like real data.
+    """
+    if df.empty:
+        return df
+    parts = []
+    for _, grp in df.sort_values("ts").groupby("appid", sort=False):
+        gaps = grp["ts"].diff() > max_gap
+        if gaps.any():
+            filler = grp.loc[gaps, ["appid", "ts"]].copy()
+            filler["ts"] = filler["ts"] - pd.Timedelta(seconds=1)
+            for c in value_cols:
+                filler[c] = float("nan")
+            grp = pd.concat([grp, filler]).sort_values("ts")
+        parts.append(grp)
+    return pd.concat(parts, ignore_index=True)
+
+
 def sale_intervals(events: pd.DataFrame, now: datetime | None = None) -> pd.DataFrame:
     """Pair sale_start with the next sale_end per game. Open sales run until `now`."""
     cols = ["appid", "start", "end", "discount_pct", "ongoing"]

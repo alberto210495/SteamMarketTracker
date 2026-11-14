@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -44,7 +45,7 @@ C = PALETTE[theme_mode()]
 
 def style(fig: go.Figure, height: int = 340, y_title: str | None = None, legend: bool = True) -> go.Figure:
     fig.update_layout(
-        height=height, margin=dict(l=8, r=8, t=36, b=8),
+        height=height, margin=dict(l=8, r=8, t=48 if legend else 12, b=8),
         paper_bgcolor=C["surface"], plot_bgcolor=C["surface"],
         font=dict(family='system-ui, -apple-system, "Segoe UI", sans-serif', color=C["ink2"], size=12),
         title_font=dict(color=C["ink"], size=14),
@@ -53,14 +54,18 @@ def style(fig: go.Figure, height: int = 340, y_title: str | None = None, legend:
         showlegend=legend,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(color=C["ink2"])),
     )
-    fig.update_xaxes(showgrid=False, linecolor=C["axis"], tickfont=dict(color=C["muted"]),
+    fig.update_xaxes(showgrid=False, linecolor=C["axis"], tickfont=dict(color=C["muted"]), automargin=True,
                      showspikes=True, spikemode="across", spikethickness=1, spikecolor=C["muted"], spikedash="dot")
     fig.update_yaxes(gridcolor=C["grid"], zeroline=False, linecolor=C["axis"], tickfont=dict(color=C["muted"]),
+                     automargin=True, title_standoff=8,
                      title_text=y_title, title_font=dict(color=C["muted"]), rangemode="tozero")
     return fig
 
 
-def show(fig: go.Figure) -> None:
+def show(fig: go.Figure, title: str | None = None) -> None:
+    # Titles live in Streamlit, not Plotly, so they can never collide with the legend.
+    if title:
+        st.markdown(f"**{title}**")
     st.plotly_chart(fig, width="stretch", theme=None, config={"displaylogo": False})
 
 
@@ -71,6 +76,17 @@ def hex_rgba(hex_color: str, alpha: float) -> str:
 
 
 # --------------------------------------------------------------------------- data
+
+def _secret_db_url() -> str | None:
+    """Streamlit Community Cloud passes credentials via st.secrets, not env vars."""
+    try:
+        return st.secrets.get("DATABASE_URL")
+    except Exception:  # no secrets.toml locally
+        return None
+
+
+if not os.environ.get("DATABASE_URL") and _secret_db_url():
+    os.environ["DATABASE_URL"] = _secret_db_url()
 
 DEMO = "--demo" in sys.argv
 DB_URL = f"sqlite:///{(config.ROOT / 'data' / 'demo.db').as_posix()}" if DEMO else config.database_url()
@@ -130,11 +146,12 @@ with st.sidebar:
     picked = st.multiselect("Games", options=list(by_size.index), default=default,
                             format_func=lambda a: NAME[a], max_selections=MAX_SERIES)
     range_label = st.radio("Time range", ["7 days", "30 days", "90 days", "All"], index=1, horizontal=True)
-    resolution = st.radio("Player resolution", ["Hourly", "Daily peak", "Daily average"], index=0,
-                          help="Daily peak smooths out the day/night cycle; good for long ranges.")
+    resolution = st.radio("Player resolution", ["Auto", "Hourly", "Daily peak", "Daily average"], index=0,
+                          help="Auto = hourly for 7 days (or while there is little data), daily peak otherwise. "
+                               "Daily peak smooths out the day/night cycle.")
     window = st.slider("Impact window (days each side)", 1, 14, 7)
     show_news = st.checkbox("Show non-patch announcements on charts", value=False)
-    st.caption(f"Database: `{engine().url.render_as_string(hide_password=True)}`")
+    st.caption(f"Data source: {'demo SQLite' if DEMO else engine().dialect.name}")
 
 if not picked:
     st.info("Pick at least one game in the sidebar.")
@@ -159,8 +176,15 @@ prices_r = in_range(prices)
 sales = analysis.sale_intervals(events, now=end)
 marker_kinds = ["patch", "manual", "price_change"] + (["announcement"] if show_news else [])
 markers = in_range(events[events["kind"].isin(marker_kinds)]) if not events.empty else events
+if resolution == "Auto":
+    few = players_r.empty or players_r["ts"].nunique() < 24 * 10
+    resolution = "Hourly" if range_label == "7 days" or few else "Daily peak"
 res_key = {"Hourly": "hourly", "Daily peak": "daily_peak", "Daily average": "daily_avg"}[resolution]
 players_view = analysis.resample_players(players_r, res_key)
+# Break lines where collection runs were missed (2+ hourly samples, or a whole day when resampled).
+players_view = analysis.with_gaps(players_view, ["players"],
+                                  timedelta(hours=2) if res_key == "hourly" else timedelta(days=1.5))
+prices_view = analysis.with_gaps(prices_r, ["final", "initial", "discount_pct"], timedelta(hours=2))
 
 # --------------------------------------------------------------------------- header
 
@@ -240,7 +264,7 @@ with tab_players:
                     fig.add_vline(x=t, line=dict(color=C["muted"], width=1, dash="dot"))
         else:
             fig.add_annotation(text="No player samples in range", showarrow=False, font=dict(color=C["muted"]))
-        show(style(fig, height=300, y_title="Concurrent players", legend=False).update_layout(title=NAME[a]))
+        show(style(fig, height=300, y_title="Concurrent players", legend=False), title=NAME[a])
 
 # --------------------------------------------------------------------------- prices
 
@@ -252,14 +276,14 @@ with tab_prices:
         cur = currencies[0] if len(currencies) == 1 else "local currency"
         fig = go.Figure()
         for a in ids:
-            d = prices_r[prices_r["appid"] == a]
+            d = prices_view[prices_view["appid"] == a]
             if d.empty:
                 continue
             fig.add_trace(go.Scatter(
                 x=d["ts"], y=d["final"], mode="lines", line=dict(color=COLOR[a], width=2, shape="hv"),
                 name=NAME[a], customdata=d[["discount_pct", "initial"]],
                 hovertemplate=NAME[a] + ": %{y:.2f} (−%{customdata[0]}% of %{customdata[1]:.2f})<extra></extra>"))
-        show(style(fig, height=380, y_title=f"Price ({cur})").update_layout(title="Store price over time"))
+        show(style(fig, height=380, y_title=f"Price ({cur})"), title="Store price over time")
 
         sale_tbl = sales[sales["appid"].isin(ids)].copy()
         if not sale_tbl.empty:
@@ -294,11 +318,10 @@ with tab_impact:
                 hovertemplate="%{customdata[2]}<br>%{customdata[0]:,.0f} → %{customdata[1]:,.0f} daily peak"
                               "<br><b>%{x:+.1f}%</b><extra></extra>"))
             fig.add_vline(x=0, line=dict(color=C["axis"], width=1))
-            style(fig, height=max(260, 28 * len(ok) + 80), legend=False).update_layout(
-                title="Change in average daily peak", hovermode="closest")
+            style(fig, height=max(260, 28 * len(ok) + 60), legend=False).update_layout(hovermode="closest")
             fig.update_xaxes(ticksuffix="%", showspikes=False, gridcolor=C["grid"], showgrid=True)
             fig.update_yaxes(showgrid=False, rangemode=None, tickfont=dict(color=C["ink2"]))
-            show(fig)
+            show(fig, title="Change in average daily peak")
         st.dataframe(
             impact[["Game", "ts", "kind", "title", "before", "after", "change_pct", "enough_data"]].rename(columns={
                 "ts": "When (UTC)", "kind": "Type", "title": "Event", "before": "Before (avg daily peak)",
@@ -316,11 +339,12 @@ with tab_compare:
     st.caption("Daily peak players rebased to 100 at the start of the range, so games of any size "
                "share one axis. 150 = 50% above where it started.")
     daily = analysis.resample_players(players_r, "daily_peak")
-    idx = analysis.index_series(daily)
+    idx = analysis.with_gaps(analysis.index_series(daily), ["players", "index"], timedelta(days=1.5))
     if idx.empty:
         st.info("No player samples in range.")
     else:
         fig = go.Figure()
+        ends = []
         for a in ids:
             d = idx[idx["appid"] == a]
             if d.empty:
@@ -328,14 +352,22 @@ with tab_compare:
             fig.add_trace(go.Scatter(x=d["ts"], y=d["index"], mode="lines", name=NAME[a],
                                      line=dict(color=COLOR[a], width=2), customdata=d["players"],
                                      hovertemplate=NAME[a] + ": %{y:.0f} (%{customdata:,} peak)<extra></extra>"))
-            if len(ids) <= 4:  # direct labels at line ends
-                fig.add_annotation(x=d["ts"].iloc[-1], y=d["index"].iloc[-1], text=NAME[a], xanchor="left",
-                                   showarrow=False, xshift=6, font=dict(color=C["ink2"], size=11))
+            last = d.dropna(subset=["index"]).iloc[-1]
+            ends.append([last["index"], last["ts"], NAME[a]])
+        if len(ends) <= 4:  # direct labels at line ends, nudged apart so they never overlap
+            vals = idx["index"].dropna()
+            min_gap = (vals.max() - vals.min()) * 0.06 or 1
+            ends.sort(key=lambda e: e[0])
+            for i in range(1, len(ends)):
+                ends[i][0] = max(ends[i][0], ends[i - 1][0] + min_gap)
+            for y, x, name in ends:
+                fig.add_annotation(x=x, y=y, text=name, xanchor="left", showarrow=False, xshift=6,
+                                   font=dict(color=C["ink2"], size=11))
         fig.add_hline(y=100, line=dict(color=C["axis"], width=1, dash="dot"))
-        style(fig, height=420, y_title="Index (start = 100)").update_layout(title="Relative player trend")
+        style(fig, height=420, y_title="Index (start = 100)")
         fig.update_yaxes(rangemode="normal")
-        fig.update_layout(margin=dict(r=140 if len(ids) <= 4 else 8))
-        show(fig)
+        fig.update_layout(margin=dict(r=170 if len(ids) <= 4 else 8))
+        show(fig, title="Relative player trend")
 
 # --------------------------------------------------------------------------- owners
 
@@ -352,13 +384,15 @@ with tab_owners:
                 d = owners[owners["appid"] == a].dropna(subset=["owners_low"])
                 if d.empty:
                     continue
-                fig.add_trace(go.Scatter(x=d["date"], y=d["owners_high"], mode="lines", line=dict(width=0),
-                                         showlegend=False, hoverinfo="skip"))
-                fig.add_trace(go.Scatter(x=d["date"], y=d["owners_low"], mode="lines", fill="tonexty",
-                                         fillcolor=hex_rgba(COLOR[a], 0.25), line=dict(color=COLOR[a], width=2),
-                                         name=NAME[a], customdata=d["owners_high"],
-                                         hovertemplate=NAME[a] + ": %{y:,} – %{customdata:,}<extra></extra>"))
-            show(style(fig, height=360, y_title="Estimated owners").update_layout(title="Owner estimate range"))
+                mid = (d["owners_low"] + d["owners_high"]) / 2
+                fig.add_trace(go.Scatter(x=d["date"], y=mid, mode="lines", name=NAME[a],
+                                         line=dict(color=COLOR[a], width=2, shape="hv"),
+                                         customdata=d[["owners_low", "owners_high"]],
+                                         hovertemplate=NAME[a] + ": %{customdata[0]:,} – %{customdata[1]:,}"
+                                                                 "<extra></extra>"))
+            style(fig, height=360, y_title="Owners (bracket midpoint)")
+            fig.update_yaxes(type="log", rangemode="normal", tickformat="~s")
+            show(fig, title="Owner estimate (log scale)")
         with cols[1]:
             fig = go.Figure()
             for a in ids:
@@ -371,9 +405,9 @@ with tab_owners:
                                          line=dict(color=COLOR[a], width=2), customdata=d["positive"] + d["negative"],
                                          hovertemplate=NAME[a] + ": %{y:.1f}% positive (%{customdata:,} reviews)"
                                                                  "<extra></extra>"))
-            style(fig, height=360, y_title="% positive reviews").update_layout(title="Review score")
+            style(fig, height=360, y_title="% positive reviews")
             fig.update_yaxes(rangemode="normal", ticksuffix="%")
-            show(fig)
+            show(fig, title="Review score")
 
 # --------------------------------------------------------------------------- raw data
 

@@ -188,3 +188,32 @@ def test_index_series_rebases_to_100():
     out = analysis.index_series(df)
     assert out[out.appid == 1]["index"].tolist() == [100, 150]
     assert out[out.appid == 2]["index"].tolist() == [100, 50]
+
+
+def test_with_gaps_inserts_break_only_in_long_gaps():
+    ts = pd.to_datetime(["2026-01-01 00:00", "2026-01-01 01:00", "2026-01-01 02:00",  # contiguous
+                         "2026-01-01 08:00", "2026-01-01 09:00"])                       # 6h hole
+    df = pd.DataFrame({"appid": 1, "ts": ts, "players": [1, 2, 3, 4, 5]})
+    out = analysis.with_gaps(df, ["players"], timedelta(hours=2))
+    assert len(out) == 6
+    nan_rows = out[out["players"].isna()]
+    assert len(nan_rows) == 1
+    assert pd.Timestamp("2026-01-01 02:00") < nan_rows["ts"].iloc[0] < pd.Timestamp("2026-01-01 08:00")
+    assert out["players"].dropna().tolist() == [1, 2, 3, 4, 5]
+
+
+def test_copy_database_is_complete_and_rerunnable(tmp_path):
+    from tracker import demo
+    src = db.get_engine(f"sqlite:///{(tmp_path / 'src.db').as_posix()}")
+    dst = db.get_engine(f"sqlite:///{(tmp_path / 'dst.db').as_posix()}")
+    demo.generate(src, days=30)
+    first = db.copy_database(src, dst)
+    db.copy_database(src, dst)  # second run must not duplicate or fail
+    for table in (db.games, db.player_snapshots, db.price_snapshots, db.owner_snapshots, db.events):
+        with src.connect() as a, dst.connect() as b:
+            n_src = a.execute(db.select(db.func.count()).select_from(table)).scalar()
+            n_dst = b.execute(db.select(db.func.count()).select_from(table)).scalar()
+        assert n_src == n_dst == first[table.name] > 0
+    # destination still accepts new events (its id sequence wasn't disturbed)
+    db.insert_ignore(dst, db.events, [{"appid": 1, "ts": datetime(2026, 1, 1), "kind": "manual",
+                                       "title": "x", "url": None, "detail": "{}", "source_id": "new"}])

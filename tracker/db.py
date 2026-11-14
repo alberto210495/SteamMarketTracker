@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    func,
     select,
 )
 from sqlalchemy.engine import Engine
@@ -159,6 +160,22 @@ def latest_price(engine: Engine, appid: int, country: str) -> dict[str, Any] | N
 def game_rows(engine: Engine) -> dict[int, dict[str, Any]]:
     with engine.connect() as conn:
         return {r["appid"]: dict(r) for r in conn.execute(select(games)).mappings()}
+
+
+def copy_database(src: Engine, dst: Engine, chunk: int = 2000) -> dict[str, int]:
+    """Copy every row from src to dst (e.g. SQLite -> PostgreSQL). Safe to re-run:
+    existing rows are skipped. Event ids are not copied, so dst's own id sequence
+    stays consistent; events dedupe on (appid, kind, source_id)."""
+    counts: dict[str, int] = {}
+    for table in (games, player_snapshots, price_snapshots, owner_snapshots, events):
+        cols = [c for c in table.columns if not (table is events and c.name == "id")]
+        n = 0
+        with src.connect() as conn:
+            result = conn.execute(select(*cols)).mappings()
+            while batch := result.fetchmany(chunk):
+                n += insert_ignore(dst, table, [dict(r) for r in batch])
+        counts[table.name] = n
+    return counts
 
 
 def has_owner_snapshot(engine: Engine, appid: int, day) -> bool:

@@ -35,8 +35,8 @@ def _cmd_annotate(args) -> int:
     engine = db.get_engine()
     ts = datetime.fromisoformat(args.at) if args.at else db.utcnow()
     db.insert_ignore(engine, db.events, [{
-        "appid": args.appid, "ts": ts.replace(tzinfo=None), "kind": "manual", "title": args.title,
-        "url": args.url, "detail": "{}", "source_id": f"manual:{ts.isoformat()}:{args.title}"[:128],
+        "appid": args.appid, "ts": ts.replace(tzinfo=None), "kind": "manual", "title": args.title[:512],
+        "url": (args.url or "")[:1024] or None, "detail": "{}", "source_id": f"manual:{ts.isoformat()}:{args.title}"[:128],
     }])
     print(f"Added manual event for {args.appid} at {ts.isoformat()} UTC")
     return 0
@@ -63,15 +63,31 @@ def _cmd_report(args) -> int:
 
 
 def _cmd_demo(args) -> int:
-    path = config.ROOT / "data" / "demo.db"
-    if path.exists() and not args.keep:
-        path.unlink()
-    engine = db.get_engine(f"sqlite:///{path.as_posix()}")
-    analysis_days = args.days
     from . import demo
-    demo.generate(engine, days=analysis_days)
+
+    path = config.ROOT / "data" / "demo.db"
+    engine = db.get_engine(f"sqlite:///{path.as_posix()}")
+    if not args.keep:
+        # Drop tables rather than deleting the file: on Windows a running
+        # dashboard holds the file open.
+        db.metadata.drop_all(engine)
+        db.metadata.create_all(engine)
+    demo.generate(engine, days=args.days)
     print(f"Wrote synthetic data to {path}")
     print("View it with:  streamlit run dashboard/app.py -- --demo")
+    return 0
+
+
+def _cmd_migrate(args) -> int:
+    src_url = args.source or f"sqlite:///{config.DEFAULT_DB_PATH.as_posix()}"
+    dst_url = args.to or config.database_url()
+    if dst_url == src_url:
+        print("Source and destination are the same. Set DATABASE_URL or pass --to.", file=sys.stderr)
+        return 2
+    src, dst = db.get_engine(src_url), db.get_engine(dst_url)
+    print(f"Copying {src.url.render_as_string(hide_password=True)} -> {dst.url.render_as_string(hide_password=True)}")
+    for table, n in db.copy_database(src, dst).items():
+        print(f"  {table}: {n} rows read (duplicates already in the destination are skipped)")
     return 0
 
 
@@ -95,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("appid", type=int)
     r.add_argument("--days", type=int, default=7, help="window on each side of the event")
     r.set_defaults(func=_cmd_report)
+
+    m = sub.add_parser("migrate", help="copy all data from one database to another (e.g. SQLite -> PostgreSQL)")
+    m.add_argument("--from", dest="source", help="source URL (default: data/steam.db)")
+    m.add_argument("--to", help="destination URL (default: $DATABASE_URL)")
+    m.set_defaults(func=_cmd_migrate)
 
     d = sub.add_parser("demo", help="generate synthetic data in data/demo.db")
     d.add_argument("--days", type=int, default=90)
