@@ -19,6 +19,28 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import importlib  # noqa: E402
+
+import tracker  # noqa: E402
+
+
+def _reload_tracker_if_changed() -> None:
+    """Streamlit only reloads modules inside the main script's folder; tracker/ sits beside
+    dashboard/, so after a redeploy a running app kept the old tracker code (TypeError on new
+    arguments). Reload the package whenever any of its files changed."""
+    files = sorted(Path(tracker.__file__).parent.glob("*.py"))
+    stamp = tuple((f.name, f.stat().st_mtime_ns) for f in files)
+    if getattr(tracker, "_code_stamp", None) == stamp:
+        return
+    for name in ("config", "db", "steam", "analysis"):  # dependency order
+        module = sys.modules.get(f"tracker.{name}")
+        if module is not None:
+            importlib.reload(module)
+    tracker._code_stamp = stamp
+
+
+_reload_tracker_if_changed()
+
 from tracker import analysis, config, db  # noqa: E402
 
 st.set_page_config(page_title="Steam Market Tracker", page_icon="📈", layout="wide")
