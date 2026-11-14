@@ -77,18 +77,14 @@ sales lift everything, and patches often ship at the same time as sales.
 
 ### GitHub Actions (default)
 
-[.github/workflows/collect.yml](.github/workflows/collect.yml) runs every hour at :07. It has two storage modes:
+[.github/workflows/collect.yml](.github/workflows/collect.yml) runs every hour at :07 and writes to PostgreSQL
+(a free [Neon](https://neon.tech) database works well).
 
-- **SQLite in the repo (zero setup):** after each run the workflow commits `data/steam.db` back to the repo.
-  This is fine for tens of games, but it adds one commit per hour. Squash or prune history now and then.
-- **PostgreSQL:** add a `DATABASE_URL` repository secret (for example a free Neon or Supabase database:
-  `postgresql://user:pass@host/db`). The workflow then writes there and skips the commit. Point the dashboard
-  at the same URL.
+Required repository secret: `DATABASE_URL` (`postgresql://user:pass@host/db?sslmode=require`). The run fails
+immediately with a clear error if it's missing. Optional secret: `STEAM_API_KEY`.
 
-Optional secret: `STEAM_API_KEY`.
-
-> GitHub may delay scheduled runs at busy times, and it disables schedules on repos with no activity for 60
-> days. The commit-back mode counts as activity.
+> GitHub may delay scheduled runs at busy times. It also disables schedules on repos with no activity for 60
+> days; the workflow re-enables itself through the API once a day to prevent that.
 
 ### Local cron / Task Scheduler
 

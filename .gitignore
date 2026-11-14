@@ -6,3 +6,4 @@ __pycache__/
 data/demo.db
 data/*.db-journal
 .streamlit/secrets.toml
+data/*.db

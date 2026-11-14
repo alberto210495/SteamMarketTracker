@@ -11,18 +11,23 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # needed only for the SQLite commit-back mode
+  contents: read   # data goes to PostgreSQL, nothing is committed back
+  actions: write   # for the keep-alive step below
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Set the DATABASE_URL secret to use PostgreSQL. Leave it unset to keep
-      # data/steam.db in the repo (committed back after each run).
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}   # Neon PostgreSQL connection string
+      STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }} # optional
     steps:
+      - name: Require DATABASE_URL
+        if: env.DATABASE_URL == ''
+        run: |
+          echo "::error::The DATABASE_URL repository secret is not set. Without it the run would write to a throwaway SQLite file and the data would be lost."
+          exit 1
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -36,16 +41,14 @@ jobs:
       - name: Collect
         run: python -m tracker collect
 
-      - name: Commit SQLite database
-        if: env.DATABASE_URL == ''
+      # GitHub disables scheduled workflows after 60 days without repo activity.
+      # Re-enabling via the API once a day resets that timer, no commits needed.
+      - name: Keep schedule alive
+        if: always() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "steam-tracker-bot"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/steam.db
-          if git diff --cached --quiet; then
-            echo "No changes"
-          else
-            git commit -m "data: collect $(date -u +%Y-%m-%dT%H:%MZ)"
-            git pull --rebase --autostash
-            git push
+          if [ "$(date -u +%H)" = "00" ]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/collect.yml/enable"
+            echo "Schedule keep-alive sent"
           fi
