@@ -1,0 +1,51 @@
+name: Collect Steam data
+
+on:
+  schedule:
+    - cron: "7 * * * *"   # hourly, at :07 (top of the hour is the busiest slot on Actions)
+  workflow_dispatch:
+
+# Never let two runs write the database at once.
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # needed only for the SQLite commit-back mode
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Set the DATABASE_URL secret to use PostgreSQL. Leave it unset to keep
+      # data/steam.db in the repo (committed back after each run).
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-worker.txt
+
+      - run: pip install -r requirements-worker.txt
+
+      - name: Collect
+        run: python -m tracker collect
+
+      - name: Commit SQLite database
+        if: env.DATABASE_URL == ''
+        run: |
+          git config user.name "steam-tracker-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/steam.db
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "data: collect $(date -u +%Y-%m-%dT%H:%MZ)"
+            git pull --rebase --autostash
+            git push
+          fi

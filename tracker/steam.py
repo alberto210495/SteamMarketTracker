@@ -1,0 +1,198 @@
+"""Thin clients for the Steam Web API, Steam storefront, and SteamSpy.
+
+Each client is rate-limited and retries transient failures (429 / 5xx / network)
+with exponential backoff. Parsers are pure functions so they can be unit-tested.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+import requests
+
+log = logging.getLogger(__name__)
+
+USER_AGENT = "steam-market-tracker/0.1 (+https://github.com/)"
+
+WEB_API = "https://api.steampowered.com"
+STORE_API = "https://store.steampowered.com/api"
+STEAMSPY_API = "https://steamspy.com/api.php"
+
+
+class HttpClient:
+    def __init__(self, min_interval: float, timeout: float = 20.0, retries: int = 4):
+        self.min_interval = min_interval
+        self.timeout = timeout
+        self.retries = retries
+        self._last = 0.0
+        self.session = requests.Session()
+        self.session.headers["User-Agent"] = USER_AGENT
+
+    def get_json(self, url: str, params: dict[str, Any] | None = None) -> Any | None:
+        delay = 2.0
+        for attempt in range(1, self.retries + 1):
+            wait = self.min_interval - (time.monotonic() - self._last)
+            if wait > 0:
+                time.sleep(wait)
+            self._last = time.monotonic()
+            try:
+                resp = self.session.get(url, params=params, timeout=self.timeout)
+            except requests.RequestException as exc:
+                log.warning("GET %s failed (%s), attempt %d/%d", url, exc, attempt, self.retries)
+            else:
+                if resp.status_code == 200:
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        log.warning("Non-JSON response from %s", url)
+                        return None
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        delay = max(delay, float(retry_after))
+                    log.warning("GET %s -> %d, attempt %d/%d", url, resp.status_code, attempt, self.retries)
+                else:
+                    log.warning("GET %s -> %d (not retrying)", url, resp.status_code)
+                    return None
+            if attempt < self.retries:
+                time.sleep(delay)
+                delay *= 2
+        return None
+
+
+# --------------------------------------------------------------------------- parsers
+
+@dataclass
+class PriceInfo:
+    is_free: bool
+    currency: str | None
+    initial_cents: int | None
+    final_cents: int | None
+    discount_pct: int
+
+
+def parse_price_entry(entry: dict[str, Any] | None) -> PriceInfo | None:
+    """Parse one appid's entry from appdetails?filters=price_overview.
+
+    Quirk: free (or unreleased / unpriced) games come back as
+    {"success": true, "data": []} - an empty list instead of a dict.
+    """
+    if not entry or not entry.get("success"):
+        return None
+    data = entry.get("data")
+    if not isinstance(data, dict) or "price_overview" not in data:
+        return PriceInfo(is_free=True, currency=None, initial_cents=0, final_cents=0, discount_pct=0)
+    po = data["price_overview"]
+    return PriceInfo(
+        is_free=False,
+        currency=po.get("currency"),
+        initial_cents=int(po.get("initial", 0)),
+        final_cents=int(po.get("final", 0)),
+        discount_pct=int(po.get("discount_percent", 0)),
+    )
+
+
+def parse_owner_range(owners: str | None) -> tuple[int | None, int | None]:
+    """SteamSpy owners look like '20,000,000 .. 50,000,000'."""
+    if not owners:
+        return None, None
+    nums = [int(n.replace(",", "")) for n in re.findall(r"[\d,]+", owners) if n.replace(",", "")]
+    if len(nums) >= 2:
+        return nums[0], nums[1]
+    if len(nums) == 1:
+        return nums[0], nums[0]
+    return None, None
+
+
+_PATCH_RE = re.compile(
+    r"\b(patch|hotfix|hot-fix|update|changelog|release notes|v\d+(\.\d+)+|version \d)",
+    re.IGNORECASE,
+)
+
+
+_NOT_PATCH_RE = re.compile(r"\b(community update|state of the game)\b", re.IGNORECASE)
+
+
+def classify_news(item: dict[str, Any]) -> str:
+    """'patch' if the post looks like patch notes, otherwise 'announcement'."""
+    tags = [t.lower() for t in item.get("tags") or []]
+    if "patchnotes" in tags:
+        return "patch"
+    title = item.get("title") or ""
+    if _NOT_PATCH_RE.search(title):
+        return "announcement"
+    if _PATCH_RE.search(title):
+        return "patch"
+    return "announcement"
+
+
+# --------------------------------------------------------------------------- client
+
+class SteamClient:
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key
+        self.web = HttpClient(min_interval=0.25)
+        # Storefront tolerates roughly 200 requests / 5 minutes.
+        self.store = HttpClient(min_interval=1.6)
+        # SteamSpy asks for at most 1 request per second.
+        self.spy = HttpClient(min_interval=1.1)
+
+    def _web_params(self, **params: Any) -> dict[str, Any]:
+        if self.api_key:
+            params["key"] = self.api_key
+        return params
+
+    def current_players(self, appid: int) -> int | None:
+        data = self.web.get_json(
+            f"{WEB_API}/ISteamUserStats/GetNumberOfCurrentPlayers/v1/",
+            self._web_params(appid=appid),
+        )
+        resp = (data or {}).get("response") or {}
+        if resp.get("result") == 1 and "player_count" in resp:
+            return int(resp["player_count"])
+        return None
+
+    def prices(self, appids: list[int], country: str, chunk: int = 50) -> dict[int, PriceInfo]:
+        """Batch price lookup. Multiple appids are only allowed with filters=price_overview."""
+        out: dict[int, PriceInfo] = {}
+        for i in range(0, len(appids), chunk):
+            batch = appids[i : i + chunk]
+            data = self.store.get_json(
+                f"{STORE_API}/appdetails",
+                {"appids": ",".join(map(str, batch)), "cc": country, "filters": "price_overview"},
+            )
+            if not data:
+                continue
+            for appid in batch:
+                info = parse_price_entry(data.get(str(appid)))
+                if info is not None:
+                    out[appid] = info
+        return out
+
+    def app_details(self, appid: int, country: str) -> dict[str, Any] | None:
+        data = self.store.get_json(f"{STORE_API}/appdetails", {"appids": appid, "cc": country, "l": "english"})
+        entry = (data or {}).get(str(appid)) or {}
+        if not entry.get("success"):
+            return None
+        return entry.get("data")
+
+    def news(self, appid: int, count: int = 20) -> list[dict[str, Any]]:
+        data = self.web.get_json(
+            f"{WEB_API}/ISteamNews/GetNewsForApp/v2/",
+            {"appid": appid, "count": count, "maxlength": 400, "feeds": "steam_community_announcements"},
+        )
+        return ((data or {}).get("appnews") or {}).get("newsitems") or []
+
+    def steamspy(self, appid: int) -> dict[str, Any] | None:
+        data = self.spy.get_json(STEAMSPY_API, {"request": "appdetails", "appid": appid})
+        if not data or not data.get("appid"):
+            return None
+        return data
+
+
+def unix_to_utc(ts: int) -> datetime:
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).replace(tzinfo=None)

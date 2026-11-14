@@ -1,0 +1,37 @@
+# Games to track. Names are fetched from the Steam store automatically;
+# the `note` field is just for you.
+#
+# country: storefront region used for prices (ISO 3166 code, e.g. us, gb, de, br)
+country = "us"
+
+[[games]]
+appid = 730
+note = "Counter-Strike 2"
+
+[[games]]
+appid = 570
+note = "Dota 2"
+
+[[games]]
+appid = 1086940
+note = "Baldur's Gate 3"
+
+[[games]]
+appid = 892970
+note = "Valheim"
+
+[[games]]
+appid = 413150
+note = "Stardew Valley"
+
+[[games]]
+appid = 1145360
+note = "Hades"
+
+[[games]]
+appid = 105600
+note = "Terraria"
+
+[[games]]
+appid = 252490
+note = "Rust"
