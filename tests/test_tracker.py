@@ -100,7 +100,7 @@ class FakeClient:
 
     def app_details(self, appid, country):
         return {"name": f"Game {appid}", "is_free": False, "developers": ["Dev"], "publishers": ["Pub"],
-                "release_date": {"date": "1 Jan, 2024"}}
+                "release_date": {"date": "1 Jan, 2024"}, "recommendations": {"total": 5000 + appid}}
 
     def news(self, appid):
         return [{"gid": "123", "title": "Patch 1.1", "url": "https://x", "date": 1_700_000_000, "tags": []}]
@@ -360,3 +360,88 @@ def test_collect_run_triggers_alerts(engine, monkeypatch):
     monkeypatch.setattr(db, "utcnow", lambda: t0 + timedelta(hours=1))
     collect.run(engine=engine, client=client, games=games, send_alerts=send)
     assert send.titles == ["On sale: Game 1"]
+
+
+# --------------------------------------------------------------------------- tracked games, reviews
+
+def test_tracked_appids_merges_config_and_dashboard(engine):
+    assert db.tracked_appids(engine, [1, 2, 3]) == [1, 2, 3]
+    db.set_tracked(engine, 9, True, name="New Game")     # added in the dashboard
+    db.set_tracked(engine, 2, False)                      # config game removed in the dashboard
+    assert db.tracked_appids(engine, [1, 2, 3]) == [1, 3, 9]
+    db.set_tracked(engine, 2, True)                       # re-added
+    db.set_tracked(engine, 9, False)
+    assert db.tracked_appids(engine, [1, 2, 3]) == [1, 2, 3]
+    assert analysis.load_tracked(engine).set_index("appid").loc[9, "name"] == "New Game"
+
+
+def test_collector_uses_dashboard_additions_and_collects_reviews_daily(engine, monkeypatch):
+    t0 = datetime(2026, 1, 1, 10)
+    monkeypatch.setattr(db, "utcnow", lambda: t0)
+    db.set_tracked(engine, 7, True)
+    games = config.GamesConfig(country="us", appids=[1])
+    stats = collect.run(engine=engine, client=FakeClient(), games=games)
+    assert stats.players == 2 and stats.reviews == 2
+    assert collect.run(engine=engine, client=FakeClient(), games=games).reviews == 0  # once per day
+    monkeypatch.setattr(db, "utcnow", lambda: t0 + timedelta(days=1))
+    assert collect.run(engine=engine, client=FakeClient(), games=games).reviews == 2
+
+
+def test_parse_review_total():
+    from tracker.steam import parse_review_total
+    assert parse_review_total({"recommendations": {"total": 477533}}) == 477533
+    assert parse_review_total({}) is None and parse_review_total(None) is None
+
+
+def test_load_reviews_new_per_day(engine):
+    db.insert_ignore(engine, db.review_snapshots, [
+        {"appid": 1, "date": datetime(2026, 1, 1).date(), "total_reviews": 1000},
+        {"appid": 1, "date": datetime(2026, 1, 2).date(), "total_reviews": 1100},
+        {"appid": 1, "date": datetime(2026, 1, 5).date(), "total_reviews": 1400},  # 3-day gap
+    ])
+    df = analysis.load_reviews(engine, [1])
+    assert df["new_reviews"].tolist()[1:] == [100, 100]
+
+
+# --------------------------------------------------------------------------- market & time zone
+
+def test_market_sale_periods_detects_shared_discounts():
+    ts = pd.date_range("2026-06-01", periods=10, freq="h")
+    rows = []
+    for a in range(1, 5):
+        for i, t in enumerate(ts):
+            on_sale = 3 <= i <= 6 and a <= 3           # 3 of 4 games discounted for 4 hours
+            rows.append({"appid": a, "ts": t, "discount_pct": 50 if on_sale else 0, "is_free": False})
+    rows += [{"appid": 99, "ts": t, "discount_pct": 0, "is_free": True} for t in ts]  # free games ignored
+    out = analysis.market_sale_periods(pd.DataFrame(rows))
+    assert len(out) == 1
+    assert out.iloc[0]["start"] == ts[3] and out.iloc[0]["end"] == ts[6]
+    assert out.iloc[0]["games_on_sale"] == 3
+
+
+def test_event_impact_vs_market():
+    event_ts = pd.Timestamp("2026-03-10 17:00")
+    def make(appid, after_mult):
+        return hourly(appid, "2026-03-01", 20, lambda t: int(1000 * (after_mult if t >= event_ts else 1)))
+    players = pd.concat([make(1, 1.5), make(2, 1.2), make(3, 1.2), make(4, 1.2)])
+    events = pd.DataFrame([{"appid": 1, "ts": event_ts, "kind": "sale_start", "title": "x"}])
+    row = analysis.event_impact(players[players.appid == 1], events, window_days=7, market_players=players).iloc[0]
+    assert row["change_pct"] == pytest.approx(50)
+    assert row["market_change_pct"] == pytest.approx(20)
+    assert row["vs_market_pct"] == pytest.approx(25)       # 1.5 / 1.2 - 1
+    assert row["market_games"] == 3
+
+
+def test_event_impact_market_needs_enough_games():
+    event_ts = pd.Timestamp("2026-03-10 17:00")
+    players = pd.concat([hourly(a, "2026-03-01", 20, lambda t: 100) for a in (1, 2)])
+    events = pd.DataFrame([{"appid": 1, "ts": event_ts, "kind": "patch", "title": "x"}])
+    row = analysis.event_impact(players, events, market_players=players).iloc[0]
+    assert pd.isna(row["vs_market_pct"]) and row["market_games"] == 1
+
+
+def test_to_timezone_converts_naive_utc():
+    df = pd.DataFrame({"ts": pd.to_datetime(["2026-01-15 18:00", "2026-07-15 18:00"])})
+    out = analysis.to_timezone(df, ["ts"], "America/Chicago")
+    assert out["ts"].tolist() == [pd.Timestamp("2026-01-15 12:00"), pd.Timestamp("2026-07-15 13:00")]  # CST / CDT
+    assert analysis.to_timezone(df, ["ts"], "UTC") is df

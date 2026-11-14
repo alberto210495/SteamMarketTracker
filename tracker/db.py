@@ -96,6 +96,29 @@ events = Table(
     UniqueConstraint("appid", "kind", "source_id", name="uq_event_source"),
 )
 
+# Daily Steam review totals (storefront appdetails `recommendations.total`).
+# New reviews per day = difference between consecutive days.
+review_snapshots = Table(
+    "review_snapshots",
+    metadata,
+    Column("appid", Integer, primary_key=True),
+    Column("date", Date, primary_key=True),
+    Column("total_reviews", BigInteger, nullable=False),
+)
+
+# Games added or removed from the dashboard. Combined with games.toml:
+# tracked = games.toml + active rows here - rows here with active = false.
+# The dashboard's read-only role is granted INSERT/UPDATE on this table only.
+tracked_games = Table(
+    "tracked_games",
+    metadata,
+    Column("appid", Integer, primary_key=True),
+    Column("name", String(255)),
+    Column("active", Boolean, nullable=False, default=True),
+    Column("added_at", DateTime),
+    Column("updated_at", DateTime),
+)
+
 # Small key/value store for bookkeeping, e.g. which events were already alerted.
 app_state = Table(
     "app_state",
@@ -173,6 +196,34 @@ def game_rows(engine: Engine) -> dict[int, dict[str, Any]]:
         return {r["appid"]: dict(r) for r in conn.execute(select(games)).mappings()}
 
 
+def tracked_appids(engine: Engine, config_appids: list[int]) -> list[int]:
+    """games.toml list, minus games removed in the dashboard, plus games added there."""
+    with engine.connect() as conn:
+        rows = conn.execute(select(tracked_games.c.appid, tracked_games.c.active)
+                            .order_by(tracked_games.c.added_at)).all()
+    removed = {r.appid for r in rows if not r.active}
+    added = [r.appid for r in rows if r.active]
+    out = [a for a in config_appids if a not in removed]
+    out += [a for a in added if a not in out]
+    return out
+
+
+def set_tracked(engine: Engine, appid: int, active: bool, name: str | None = None) -> None:
+    now = utcnow()
+    with engine.connect() as conn:
+        existing = conn.execute(select(tracked_games).where(tracked_games.c.appid == appid)).mappings().first()
+    row = {"appid": appid, "active": active, "updated_at": now,
+           "name": name or (existing["name"] if existing else None),
+           "added_at": existing["added_at"] if existing else now}
+    upsert(engine, tracked_games, [row], ["appid"])
+
+
+def has_review_snapshot(engine: Engine, appid: int, day) -> bool:
+    t = review_snapshots
+    with engine.connect() as conn:
+        return conn.execute(select(t.c.appid).where(t.c.appid == appid, t.c.date == day)).first() is not None
+
+
 def get_state(engine: Engine, key: str) -> str | None:
     with engine.connect() as conn:
         return conn.execute(select(app_state.c.value).where(app_state.c.key == key)).scalar()
@@ -187,7 +238,8 @@ def copy_database(src: Engine, dst: Engine, chunk: int = 2000) -> dict[str, int]
     existing rows are skipped. Event ids are not copied, so dst's own id sequence
     stays consistent; events dedupe on (appid, kind, source_id)."""
     counts: dict[str, int] = {}
-    for table in (games, player_snapshots, price_snapshots, owner_snapshots, events):
+    for table in (games, player_snapshots, price_snapshots, owner_snapshots, review_snapshots,
+                  tracked_games, events):
         cols = [c for c in table.columns if not (table is events and c.name == "id")]
         n = 0
         with src.connect() as conn:

@@ -108,6 +108,15 @@ def parse_owner_range(owners: str | None) -> tuple[int | None, int | None]:
     return None, None
 
 
+def parse_review_total(details: dict[str, Any] | None) -> int | None:
+    """Steam's running review count from appdetails: {"recommendations": {"total": N}}."""
+    total = ((details or {}).get("recommendations") or {}).get("total")
+    try:
+        return int(total) if total is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 _PATCH_RE = re.compile(
     r"\b(patch|hotfix|hot-fix|update|changelog|release notes|v\d+(\.\d+)+|version \d)",
     re.IGNORECASE,

@@ -13,12 +13,13 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from . import config, db
-from .steam import PriceInfo, SteamClient, classify_news, parse_owner_range, unix_to_utc
+from .steam import (PriceInfo, SteamClient, classify_news, parse_owner_range, parse_review_total,
+                    unix_to_utc)
 
 log = logging.getLogger(__name__)
 
 METADATA_MAX_AGE = timedelta(days=7)
-ALL_STEPS = ("metadata", "players", "prices", "news", "owners", "alerts")  # alerts run last
+ALL_STEPS = ("metadata", "players", "prices", "news", "owners", "reviews", "alerts")  # alerts run last
 
 
 @dataclass
@@ -28,12 +29,13 @@ class RunStats:
     events: int = 0
     news: int = 0
     owners: int = 0
+    reviews: int = 0
     metadata: int = 0
     failures: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         s = (f"players={self.players} prices={self.prices} price_events={self.events} "
-             f"news={self.news} owners={self.owners} metadata={self.metadata}")
+             f"news={self.news} owners={self.owners} reviews={self.reviews} metadata={self.metadata}")
         if self.failures:
             s += f" failures={len(self.failures)}"
         return s
@@ -184,6 +186,21 @@ def collect_owners(engine: Engine, client: SteamClient, appids: list[int], ts: d
         stats.owners += 1
 
 
+def collect_reviews(engine: Engine, client: SteamClient, appids: list[int], country: str,
+                    ts: datetime, stats: RunStats) -> None:
+    """Steam's total review count, once per UTC day (new reviews/day = daily difference)."""
+    day = ts.date()
+    for appid in appids:
+        if db.has_review_snapshot(engine, appid, day):
+            continue
+        total = parse_review_total(client.app_details(appid, country))
+        if total is None:
+            stats.failures.append(f"reviews:{appid}")
+            continue
+        db.insert_ignore(engine, db.review_snapshots, [{"appid": appid, "date": day, "total_reviews": total}])
+        stats.reviews += 1
+
+
 def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         client: SteamClient | None = None, games: config.GamesConfig | None = None,
         send_alerts=None) -> RunStats:
@@ -195,7 +212,8 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
     stats = RunStats()
     # Truncate to the hour so a sample is keyed by "which hour", and re-runs are no-ops.
     ts = db.utcnow().replace(minute=0, second=0, microsecond=0)
-    appids = games.appids
+    # games.toml plus games added in the dashboard, minus games removed there
+    appids = db.tracked_appids(engine, games.appids)
     log.info("Collecting %s for %d games at %s UTC", ",".join(steps), len(appids), ts.isoformat())
 
     step_fns = {
@@ -204,6 +222,7 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         "prices": lambda: collect_prices(engine, client, appids, games.country, ts, stats),
         "news": lambda: collect_news(engine, client, appids, stats),
         "owners": lambda: collect_owners(engine, client, appids, ts, stats),
+        "reviews": lambda: collect_reviews(engine, client, appids, games.country, ts, stats),
     }
     for step in ALL_STEPS:
         if step not in steps or step not in step_fns:

@@ -36,8 +36,13 @@ Demo games are named `[Demo] …` and live in a separate database, so they never
 
 ## Choosing games
 
-Edit [games.toml](games.toml). Find an app ID in the store URL: `store.steampowered.com/app/<appid>/…`.
-`country` sets the storefront region (and currency) for prices.
+Either use the dashboard's **Manage games** tab (search by name, click *Track* or *Remove*; needs the
+`ADMIN_PASSWORD` secret, see [Hosting the dashboard](#hosting-the-dashboard-streamlit-community-cloud)), or edit
+[games.toml](games.toml): find an app ID in the store URL `store.steampowered.com/app/<appid>/…`.
+
+The collector tracks the games in `games.toml`, plus games added in the dashboard, minus games removed there.
+Removing a game stops collection and hides it, but keeps its history. Changes apply from the next hourly run.
+`country` in `games.toml` sets the storefront region (and currency) for prices.
 
 ## What gets collected
 
@@ -47,7 +52,8 @@ Edit [games.toml](games.toml). Find an app ID in the store URL: `store.steampowe
 | Price / discount | `store.steampowered.com/api/appdetails?filters=price_overview` | every run | Batched: one request covers up to 50 games |
 | Sales | derived | every run | `sale_start` / `sale_end` / `sale_change` / `price_change` events, created by comparing each sample with the previous one |
 | Patches & announcements | `ISteamNews/GetNewsForApp` (official announcements feed) | every run | `patch` if tagged `patchnotes` or the title looks like patch notes |
-| Owners, reviews, playtime | SteamSpy `appdetails` | once per UTC day | Owners is a coarse **range** estimate |
+| Owners, positive/negative reviews, playtime | SteamSpy `appdetails` | once per UTC day | Owners is a coarse **range** estimate |
+| Steam review total | storefront `appdetails` (`recommendations.total`) | once per UTC day | New reviews per day = difference between days |
 | Name, developer, etc. | storefront `appdetails` | weekly | |
 
 No API key is required. If you set `STEAM_API_KEY` it is sent with Web API calls.
@@ -89,8 +95,20 @@ in the N days before an event with the N days after. The 24-hour buckets are ali
 one holds a full day/night cycle and time of day doesn't skew the comparison. Rows without enough samples on
 both sides (under 60% coverage) are flagged rather than hidden.
 
-This shows correlation, not causation. A sale that starts on a Thursday will overlap a weekend, Steam seasonal
-sales lift everything, and patches often ship at the same time as sales.
+**Vs market** (the default) compares that change with the rest of your tracked games over the same days: the
+median change of the other games is the *market change*, and *vs market* = (1 + game change) / (1 + market
+change) − 1. If everything rose 20% during a Steam-wide sale and your game rose 50%, it did 25% better than the
+market. It needs at least two other games with enough data around the event.
+
+**Market-wide sales** are detected from the price data: periods when at least half of the tracked paid games (and at
+least 3) are discounted at once, usually a Steam seasonal sale. They're shaded grey on the player charts and
+listed on the *Prices & sales* tab. The more games you track, the more reliable both of these become.
+
+This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
+(a streamer, a trailer) won't show up in the market baseline.
+
+All times in the dashboard are shown in your browser's time zone by default (switchable in the sidebar); the
+database stores UTC.
 
 ## Scheduling
 
@@ -140,9 +158,14 @@ python -m tracker migrate --to "postgresql://user:pass@host/db"
    branch `main`, main file `dashboard/app.py`.
 2. **Advanced settings → Secrets**:
    ```toml
-   DATABASE_URL = "postgresql://user:pass@host/db"
+   DATABASE_URL = "postgresql://dashboard_ro:pass@host/db"   # read-only role
+   ADMIN_PASSWORD = "something long"                          # optional: enables the Manage games tab
    ```
 3. Deploy. The app reads the same database the hourly job writes to; queries are cached for 5 minutes.
+
+The dashboard should connect with a read-only role. The only write it ever makes is to the `tracked_games`
+table, from the Manage games tab, so that role needs `GRANT SELECT, INSERT, UPDATE ON tracked_games`. The
+dashboard never creates tables; the collector owns the schema.
 
 For local runs you can put the same line in `.streamlit/secrets.toml` (git-ignored) instead of an env var.
 

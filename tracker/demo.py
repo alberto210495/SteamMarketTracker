@@ -33,9 +33,12 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
         "release_date": "Jan 1, 2024", "header_image": "", "updated_at": now,
     } for a, n, _, _ in DEMO_GAMES], ["appid"])
 
+    # One shared "seasonal" sale for every game, so the market-wide sale detection has something to find.
+    seasonal = (start + timedelta(days=days - 26, hours=17), start + timedelta(days=days - 16, hours=17), 40)
+
     for appid, name, base, price in DEMO_GAMES:
-        # Two sales and two patches per game, at random points.
-        sales = []
+        # Two sales and two patches per game, at random points, plus the seasonal sale.
+        sales = [seasonal]
         for _ in range(2):
             s = start + timedelta(days=rng.randint(10, days - 12), hours=17)
             sales.append((s, s + timedelta(days=rng.choice([7, 10, 14])), rng.choice([25, 33, 50, 60, 75])))
@@ -95,7 +98,18 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
                            "ccu": int(base * 1.1), "positive": pos, "negative": int(pos * (neg_ratio + d * rng.uniform(-0.0002, 0.0004))),
                            "avg_playtime_min": 1200 + d * 3, "median_playtime_min": 600 + d})
 
+        # Steam review totals: new reviews per day roughly track the day's peak players.
+        daily_peak: dict = {}
+        for r in players:
+            daily_peak[r["ts"].date()] = max(daily_peak.get(r["ts"].date(), 0), r["players"])
+        total = base * 40
+        reviews = []
+        for day in sorted(daily_peak):
+            total += int(daily_peak[day] * rng.uniform(0.003, 0.006))
+            reviews.append({"appid": appid, "date": day, "total_reviews": total})
+
         db.insert_ignore(engine, db.player_snapshots, players)
         db.insert_ignore(engine, db.price_snapshots, prices)
         db.insert_ignore(engine, db.events, events)
         db.insert_ignore(engine, db.owner_snapshots, owners)
+        db.insert_ignore(engine, db.review_snapshots, reviews)

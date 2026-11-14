@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from . import db
 
@@ -168,34 +169,125 @@ def _window_daily_peaks(series: pd.Series, anchor: pd.Timestamp, days: int, befo
     return float(peaks.mean()), min(coverage, 1.0)
 
 
+def _window_change(series: pd.Series, anchor: pd.Timestamp,
+                   days: int) -> tuple[float | None, float | None, float | None, float, float]:
+    b, cb = _window_daily_peaks(series, anchor, days, before=True)
+    a, ca = _window_daily_peaks(series, anchor, days, before=False)
+    change = (a - b) / b * 100 if (a is not None and b) else None
+    return b, a, change, cb, ca
+
+
 def event_impact(players: pd.DataFrame, events: pd.DataFrame, window_days: int = 7,
-                 min_coverage: float = 0.6) -> pd.DataFrame:
+                 min_coverage: float = 0.6, market_players: pd.DataFrame | None = None,
+                 min_market_games: int = 2) -> pd.DataFrame:
     """For each event: average daily-peak players in the N days before vs after.
 
-    Correlation, not causation - overlapping events, weekends and seasonal
-    sales all move numbers too. Rows lacking enough samples on either side are
+    With `market_players` (all tracked games), each event is also compared with
+    the *market*: the median change of the other games over the same windows.
+    `vs_market_pct` is the game's change relative to that, so a Steam-wide sale
+    that lifts everything doesn't look like this game's success:
+        vs_market = (1 + change) / (1 + market_change) - 1
+
+    Correlation, not causation. Rows lacking enough samples on either side are
     flagged with `enough_data=False` instead of being dropped.
     """
     cols = ["appid", "ts", "kind", "title", "before", "after", "change_pct", "coverage_before",
-            "coverage_after", "enough_data"]
+            "coverage_after", "enough_data", "market_change_pct", "market_games", "vs_market_pct"]
     if players.empty or events.empty:
         return pd.DataFrame(columns=cols)
+    pool = market_players if market_players is not None else pd.DataFrame(columns=["appid", "ts", "players"])
+    market_series = {a: g.set_index("ts")["players"].sort_index() for a, g in pool.groupby("appid")}
     out = []
     for appid, evs in events.groupby("appid"):
         series = players[players["appid"] == appid].set_index("ts")["players"].sort_index()
         if series.empty:
             continue
         for _, ev in evs.iterrows():
-            b, cb = _window_daily_peaks(series, ev["ts"], window_days, before=True)
-            a, ca = _window_daily_peaks(series, ev["ts"], window_days, before=False)
-            change = (a - b) / b * 100 if (a is not None and b) else None
+            b, a, change, cb, ca = _window_change(series, ev["ts"], window_days)
+            others = []
+            for other, s in market_series.items():
+                if other == appid:
+                    continue
+                _, _, oc, ocb, oca = _window_change(s, ev["ts"], window_days)
+                if oc is not None and ocb >= min_coverage and oca >= min_coverage:
+                    others.append(oc)
+            market = float(pd.Series(others).median()) if len(others) >= min_market_games else None
+            vs_market = ((1 + change / 100) / (1 + market / 100) - 1) * 100 \
+                if (change is not None and market is not None and market > -100) else None
             out.append({
                 "appid": appid, "ts": ev["ts"], "kind": ev["kind"], "title": ev.get("title"),
                 "before": b, "after": a, "change_pct": change,
                 "coverage_before": cb, "coverage_after": ca,
                 "enough_data": cb >= min_coverage and ca >= min_coverage,
+                "market_change_pct": market, "market_games": len(others), "vs_market_pct": vs_market,
             })
     return pd.DataFrame(out, columns=cols).sort_values("ts", ascending=False, ignore_index=True)
+
+
+def market_sale_periods(prices: pd.DataFrame, min_share: float = 0.5, min_games: int = 3,
+                        max_gap: timedelta = timedelta(hours=3)) -> pd.DataFrame:
+    """Periods when at least `min_share` of the tracked paid games (and at least
+    `min_games` of them) were discounted at the same time - usually a Steam
+    seasonal sale. Derived from the data, so no hard-coded sale calendar."""
+    cols = ["start", "end", "share", "games_on_sale"]
+    if prices.empty:
+        return pd.DataFrame(columns=cols)
+    paid = prices[~prices["is_free"].astype(bool)]
+    if paid.empty:
+        return pd.DataFrame(columns=cols)
+    by_ts = paid.groupby("ts").agg(total=("appid", "nunique"),
+                                   on_sale=("discount_pct", lambda d: int((d.fillna(0) > 0).sum())))
+    by_ts["share"] = by_ts["on_sale"] / by_ts["total"]
+    hits = by_ts[(by_ts["share"] >= min_share) & (by_ts["on_sale"] >= min_games)].sort_index()
+    rows, start, prev, shares, counts = [], None, None, [], []
+    for ts, r in hits.iterrows():
+        if start is not None and ts - prev > max_gap:
+            rows.append({"start": start, "end": prev, "share": max(shares), "games_on_sale": max(counts)})
+            start, shares, counts = None, [], []
+        if start is None:
+            start = ts
+        prev = ts
+        shares.append(r["share"]); counts.append(int(r["on_sale"]))
+    if start is not None:
+        rows.append({"start": start, "end": prev, "share": max(shares), "games_on_sale": max(counts)})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def to_timezone(df: pd.DataFrame, cols: list[str], tz: str) -> pd.DataFrame:
+    """Stored timestamps are naive UTC; convert to naive local time for display."""
+    if df.empty or tz in ("UTC", "Etc/UTC"):
+        return df
+    df = df.copy()
+    for c in cols:
+        if c in df and pd.api.types.is_datetime64_any_dtype(df[c]):
+            df[c] = df[c].dt.tz_localize("UTC").dt.tz_convert(tz).dt.tz_localize(None)
+    return df
+
+
+def load_reviews(engine: Engine, appids: list[int]) -> pd.DataFrame:
+    """Daily review totals plus `new_reviews` (per day, spread evenly over any gap)."""
+    t = db.review_snapshots
+    cols = ["appid", "date", "total_reviews", "new_reviews"]
+    try:
+        df = _read(engine, select(t).where(t.c.appid.in_(appids)).order_by(t.c.date))
+    except (OperationalError, ProgrammingError):  # table not created yet
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["appid", "date"])
+    days = df.groupby("appid")["date"].diff().dt.days
+    df["new_reviews"] = df.groupby("appid")["total_reviews"].diff() / days
+    return df
+
+
+def load_tracked(engine: Engine) -> pd.DataFrame:
+    t = db.tracked_games
+    try:
+        df = _read(engine, select(t).order_by(t.c.added_at))
+    except (OperationalError, ProgrammingError):
+        df = pd.DataFrame()
+    return df if not df.empty else pd.DataFrame(columns=[c.name for c in t.columns])
 
 
 def index_series(df: pd.DataFrame, value: str = "players") -> pd.DataFrame:
