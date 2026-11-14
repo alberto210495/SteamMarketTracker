@@ -13,7 +13,9 @@ import logging
 import sys
 from datetime import datetime
 
-from . import analysis, collect, config, db
+# Keep this import list free of pandas: the scheduled job installs only
+# requirements-worker.txt. `analysis` (pandas) is imported inside _cmd_report.
+from . import collect, config, db
 
 
 def _cmd_collect(args) -> int:
@@ -41,6 +43,8 @@ def _cmd_annotate(args) -> int:
 
 
 def _cmd_report(args) -> int:
+    from . import analysis
+
     engine = db.get_engine()
     players = analysis.load_players(engine, [args.appid])
     events = analysis.load_events(engine, [args.appid])
