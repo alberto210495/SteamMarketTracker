@@ -147,6 +147,10 @@ review quality (% positive). Trends score 50 when flat and 0/100 at ±40%; parts
 This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
 (a streamer, a trailer) won't show up in the market baseline.
 
+The **Game detail** tab puts one game on a page: store header and links, key numbers (players now, 24h and
+all-time tracked peak, health, price and lowest tracked price, review score, followers), the player chart with sales,
+events and Twitch, price and weekly sentiment charts, and a timeline of every event and review bomb.
+
 Every tab ends with **⬇ CSV** (the tab's main table) and **⬇ Excel** (every table on the tab, one sheet each);
 the *Data* tab also downloads all raw tables for the selected games in one workbook. Files are built only when
 clicked.

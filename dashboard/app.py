@@ -413,13 +413,13 @@ st.dataframe(
 EXPORT: dict[str, dict[str, pd.DataFrame]] = {
     "players": {"Players (chart)": players_view, "Players hourly": players_r, "Twitch": in_range(twitch)},
     "prices": {"Prices": prices_r, "Market-wide sales": market_sales},
-    "impact": {}, "compare": {}, "patterns": {},
+    "impact": {}, "compare": {}, "patterns": {}, "detail": {},
     "owners": {"Owners (SteamSpy)": owners, "Review totals": reviews, "Review split": sentiment},
 }
 
-tab_players, tab_prices, tab_impact, tab_compare, tab_patterns, tab_owners, tab_data, tab_manage = st.tabs(
-    ["Players", "Prices & sales", "Event impact", "Compare trends", "Patterns", "Owners & reviews", "Data",
-     "Manage games"])
+(tab_players, tab_detail, tab_prices, tab_impact, tab_compare, tab_patterns, tab_owners, tab_data,
+ tab_manage) = st.tabs(["Players", "Game detail", "Prices & sales", "Event impact", "Compare trends", "Patterns",
+                        "Owners & reviews", "Data", "Manage games"])
 
 # --------------------------------------------------------------------------- players
 
@@ -477,6 +477,145 @@ with tab_players:
         show(fig, title=NAME[a])
 
     export_buttons(EXPORT["players"], "players")
+
+# --------------------------------------------------------------------------- game detail
+
+EVENT_ICONS = {"sale_start": "🏷️", "sale_end": "⏹️", "sale_change": "🏷️", "price_change": "💲", "patch": "🔧",
+               "announcement": "📣", "manual": "📌", "review_bomb": "💣"}
+
+with tab_detail:
+    order = list(by_size.index)
+    gid = st.selectbox("Game", order, index=order.index(ids[0]) if ids[0] in order else 0,
+                       format_func=lambda a: NAME[a], key="detail_game")
+    one = (gid,)
+    g_players = analysis.to_timezone(q_players(DB_URL, one), ["ts"], TZ)
+    g_prices = analysis.to_timezone(q_prices(DB_URL, one), ["ts"], TZ)
+    g_events = analysis.to_timezone(q_events(DB_URL, one), ["ts"], TZ)
+    g_owners, g_reviews, g_sent = q_owners(DB_URL, one), q_reviews(DB_URL, one), q_sentiment(DB_URL, one)
+    g_twitch = analysis.to_timezone(q_twitch(DB_URL, one), ["ts"], TZ)
+    g_followers = q_followers(DB_URL, one)
+    meta = games.set_index("appid").loc[gid]
+
+    c_img, c_meta = st.columns([1, 2])
+    if isinstance(meta.get("header_image"), str) and meta["header_image"].startswith("http"):
+        c_img.image(meta["header_image"], width="stretch")
+    status, _ = analysis.release_status(meta.get("release_date"), db.utcnow())
+    c_meta.markdown(f"### {NAME[gid]}\n"
+                    f"{meta.get('developers') or '—'} · published by {meta.get('publishers') or '—'}  \n"
+                    f"Released: {meta.get('release_date') or '—'}"
+                    + (" · **upcoming**" if status == "upcoming" else "")
+                    + f"  \n[Steam store](https://store.steampowered.com/app/{gid}/) · "
+                    f"[SteamDB](https://steamdb.info/app/{gid}/)")
+
+    health_row = analysis.health_scores(g_players, g_reviews, g_owners, g_sent)
+    m = st.columns(4)
+    if not g_players.empty:
+        last = g_players.sort_values("ts").iloc[-1]
+        m[0].metric("Players now", f"{int(last['players']):,}")
+        peak24 = g_players[g_players["ts"] > last["ts"] - timedelta(hours=24)]["players"].max()
+        m[1].metric("24h peak", f"{int(peak24):,}")
+        top = g_players.loc[g_players["players"].idxmax()]
+        m[2].metric("Peak since tracking", f"{int(top['players']):,}", help=f"{top['ts']:%Y-%m-%d %H:%M} {TZ_LABEL}")
+    h = health_row["health"].iloc[0] if not health_row.empty else None
+    m[3].metric("Health", "—" if h is None or pd.isna(h) else f"{h:.0f} / 100")
+    m = st.columns(4)
+    if not g_prices.empty:
+        lp = g_prices.sort_values("ts").iloc[-1]
+        m[0].metric("Price", "Free" if lp["is_free"] else f"{lp['final']:.2f} {lp['currency'] or ''}",
+                    delta=f"-{int(lp['discount_pct'])}%" if lp["discount_pct"] else None, delta_color="inverse")
+        paid = g_prices[~g_prices["is_free"].astype(bool)]
+        if not paid.empty:
+            m[1].metric("Lowest tracked price", f"{paid['final'].min():.2f} {lp['currency'] or ''}")
+    if not g_sent.empty:
+        ls = g_sent.sort_values("date").iloc[-1]
+        m[2].metric("Steam reviews", f"{ls['positive_pct']:.1f}% positive",
+                    help=f"{ls['review_score_desc'] or ''} · {int(ls['total_positive'] + ls['total_negative']):,} reviews")
+    elif not g_owners.empty and g_owners["positive"].notna().any():
+        lo = g_owners.dropna(subset=["positive"]).iloc[-1]
+        tot = lo["positive"] + lo["negative"]
+        m[2].metric("Reviews (SteamSpy)", f"{lo['positive'] / tot * 100:.1f}% positive" if tot else "—")
+    if not g_followers.empty:
+        lf = g_followers.iloc[-1]
+        m[3].metric("Followers", f"{int(lf['followers']):,}")
+
+    # players: daily peak (or hourly for short ranges) with sales, events and Twitch
+    gp = in_range(g_players)
+    view = analysis.resample_players(gp, res_key)
+    view = analysis.with_gaps(view, ["players"], timedelta(hours=2) if res_key == "hourly" else timedelta(days=1.5))
+    fig = go.Figure()
+    for sl in analysis.sale_intervals(g_events, now=end).itertuples():
+        if start is not None and sl.end < start:
+            continue
+        fig.add_vrect(x0=max(sl.start, start) if start is not None else sl.start, x1=sl.end,
+                      fillcolor=hex_rgba(COLOR.get(gid, C["series"][0]), 0.12), line_width=0, layer="below",
+                      annotation_text=f"-{sl.discount_pct}%", annotation_position="top left",
+                      annotation_font=dict(color=C["ink2"], size=11))
+    if not view.empty:
+        fig.add_trace(go.Scatter(x=view["ts"], y=view["players"], mode="lines", name="Players",
+                                 line=dict(color=COLOR.get(gid, C["series"][0]), width=2),
+                                 hovertemplate="%{y:,} players<extra></extra>"))
+        mk = in_range(g_events[g_events["kind"].isin(["patch", "manual", "price_change"])]) if not g_events.empty \
+            else g_events
+        if not mk.empty:
+            fig.add_trace(go.Scatter(x=mk["ts"], y=[view["players"].max() * 1.04] * len(mk), mode="markers",
+                                     name="Events", marker=dict(symbol="triangle-down", size=10, color=C["ink2"]),
+                                     text=mk["title"], customdata=mk["kind"],
+                                     hovertemplate="<b>%{customdata}</b>: %{text}<extra></extra>"))
+    gtw = in_range(g_twitch)
+    if not gtw.empty:
+        if res_key != "hourly":
+            gtw = gtw.set_index("ts")["viewers"].resample("1D").agg("max" if res_key == "daily_peak" else "mean") \
+                .dropna().reset_index()
+        fig.add_trace(go.Scatter(x=gtw["ts"], y=gtw["viewers"], mode="lines", name="Twitch viewers", yaxis="y2",
+                                 line=dict(color=C["muted"], width=1.5, dash="dot"),
+                                 hovertemplate="%{y:,} viewers<extra></extra>"))
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False, rangemode="tozero",
+                                      tickfont=dict(color=C["muted"])))
+    show(style(fig, height=340, y_title="Concurrent players"), title=f"Players ({resolution.lower()})")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        gpr = analysis.with_gaps(in_range(g_prices), ["final"], timedelta(hours=2))
+        if not gpr.empty:
+            fig = go.Figure(go.Scatter(x=gpr["ts"], y=gpr["final"], mode="lines",
+                                       line=dict(color=COLOR.get(gid, C["series"][0]), width=2, shape="hv"),
+                                       hovertemplate="%{y:.2f}<extra></extra>"))
+            show(style(fig, height=260, legend=False, y_title="Price"), title="Price")
+    with c2:
+        wk = analysis.weekly_sentiment(g_sent)
+        if not wk.empty:
+            fig = go.Figure(go.Bar(x=wk["week"], y=wk["week_positive_pct"], marker=dict(
+                color=COLOR.get(gid, C["series"][0]), cornerradius=3), customdata=wk["reviews"],
+                hovertemplate="%{y:.1f}% positive (%{customdata:,.0f} reviews)<extra></extra>"))
+            style(fig, height=260, legend=False, y_title="% positive")
+            fig.update_yaxes(rangemode="normal", ticksuffix="%")
+            show(fig, title="Weekly review sentiment")
+        elif not g_followers.empty:
+            fig = go.Figure(go.Scatter(x=g_followers["date"], y=g_followers["followers"], mode="lines",
+                                       line=dict(color=COLOR.get(gid, C["series"][0]), width=2)))
+            show(style(fig, height=260, legend=False, y_title="Followers"), title="Followers")
+
+    st.subheader("Timeline")
+    tl = g_events[["ts", "kind", "title", "url"]].copy() if not g_events.empty else pd.DataFrame(
+        columns=["ts", "kind", "title", "url"])
+    bombs_g = analysis.review_bombs(g_sent, g_events)
+    if not bombs_g.empty:
+        tl = pd.concat([tl, pd.DataFrame({"ts": bombs_g["date"], "kind": "review_bomb", "url": None,
+                                          "title": [f"{n:,.0f} negative reviews in a day" for n in
+                                                    bombs_g["new_negative"]]})], ignore_index=True)
+    if not show_news and not tl.empty:
+        tl = tl[tl["kind"] != "announcement"]
+    tl = in_range(tl).sort_values("ts", ascending=False) if not tl.empty else tl
+    if tl.empty:
+        st.caption("No events in the selected range.")
+    else:
+        tl.insert(0, " ", tl["kind"].map(EVENT_ICONS).fillna("•"))
+        st.dataframe(tl.rename(columns={"ts": f"When ({TZ_LABEL})", "kind": "Type", "title": "Event", "url": "Link"}),
+                     hide_index=True, width="stretch",
+                     column_config={"Link": st.column_config.LinkColumn(display_text="open")})
+    EXPORT["detail"] = {"Timeline": tl, "Players": gp, "Prices": in_range(g_prices), "Weekly sentiment":
+                        analysis.weekly_sentiment(g_sent), "Followers": g_followers, "Twitch": in_range(g_twitch)}
+    export_buttons(EXPORT["detail"], f"game-{gid}")
 
 # --------------------------------------------------------------------------- prices
 
