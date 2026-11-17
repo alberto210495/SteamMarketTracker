@@ -96,7 +96,9 @@ class FakeClient:
         return 1000 + appid
 
     def prices(self, appids, country):
-        return {a: price(self.discount) for a in appids}
+        mult = {"us": 1, "gb": 0.8}.get(country, 1)
+        return {a: price(self.discount, initial=int(2000 * mult), currency="USD" if country == "us" else "GBP")
+                for a in appids}
 
     def app_details(self, appid, country):
         return {"name": f"Game {appid}", "is_free": False, "developers": ["Dev"], "publishers": ["Pub"],
@@ -597,3 +599,44 @@ def test_review_bomb_detection_and_alert(engine):
 ])
 def test_is_review_bomb(neg, pos, hist, expected):
     assert alerts_mod.is_review_bomb(neg, pos, hist, 30) is expected
+
+
+
+# --------------------------------------------------------------------------- regional prices
+
+def test_extra_countries_store_prices_without_events(engine, monkeypatch):
+    t0 = datetime(2026, 1, 1, 10)
+    monkeypatch.setattr(db, "utcnow", lambda: t0)
+    client = FakeClient()
+    games = config.GamesConfig(country="us", appids=[1], extra_countries=["gb"])
+    collect.run(engine=engine, client=client, games=games)
+    client.discount = 50
+    monkeypatch.setattr(db, "utcnow", lambda: t0 + timedelta(hours=1))
+    collect.run(engine=engine, client=client, games=games)
+    allp = analysis.load_prices(engine, [1])
+    assert sorted(allp["country"].unique()) == ["gb", "us"] and len(allp) == 4
+    assert len(analysis.load_prices(engine, [1], country="us")) == 2
+    ev = analysis.load_events(engine, [1], kinds=["sale_start"])
+    assert len(ev) == 1 and ev.iloc[0]["source_id"].startswith("us:")   # sale counted once
+
+
+def test_regional_prices_conversion():
+    ts = pd.Timestamp("2026-01-01")
+    prices = pd.DataFrame([
+        {"appid": 1, "ts": ts, "country": "us", "currency": "USD", "final": 20.0, "initial": 20.0,
+         "discount_pct": 0, "is_free": False},
+        {"appid": 1, "ts": ts, "country": "gb", "currency": "GBP", "final": 12.0, "initial": 12.0,
+         "discount_pct": 0, "is_free": False},
+        {"appid": 1, "ts": ts, "country": "br", "currency": "BRL", "final": 50.0, "initial": 50.0,
+         "discount_pct": 0, "is_free": False},
+    ])
+    out = analysis.regional_prices(prices, "us", {"GBP": 0.75}, "USD").set_index("country")
+    assert out.loc["gb", "converted"] == pytest.approx(16) and out.loc["gb", "vs_main_pct"] == pytest.approx(-20)
+    assert pd.isna(out.loc["br", "converted"])          # no rate -> not converted
+    assert out.loc["gb", "cheapest"] and not out.loc["us", "cheapest"]
+
+
+def test_games_toml_extra_countries(tmp_path):
+    p = tmp_path / "g.toml"
+    p.write_text('country = "us"\nextra_countries = ["GB", "us", "gb", "de"]\n[[games]]\nappid = 1\n')
+    assert config.load_games(p).extra_countries == ["gb", "de"]

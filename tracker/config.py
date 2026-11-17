@@ -36,6 +36,7 @@ def steam_api_key() -> str | None:
 class GamesConfig:
     country: str = "us"
     appids: list[int] = field(default_factory=list)
+    extra_countries: list[str] = field(default_factory=list)   # price snapshots only, no sale events
     alerts: "AlertsConfig" = field(default_factory=lambda: AlertsConfig())
 
 
@@ -67,4 +68,7 @@ def load_games(path: Path | None = None) -> GamesConfig:
     appids = [a for a in appids if not (a in seen or seen.add(a))]
     known = AlertsConfig.__dataclass_fields__
     alerts = AlertsConfig(**{k: v for k, v in (raw.get("alerts") or {}).items() if k in known})
-    return GamesConfig(country=str(raw.get("country", "us")).lower(), appids=appids, alerts=alerts)
+    country = str(raw.get("country", "us")).lower()
+    extra = [str(c).lower() for c in raw.get("extra_countries") or []]
+    extra = [c for i, c in enumerate(extra) if c != country and c not in extra[:i]]
+    return GamesConfig(country=country, appids=appids, alerts=alerts, extra_countries=extra)

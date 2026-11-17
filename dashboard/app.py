@@ -148,9 +148,28 @@ def q_players(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
     return analysis.load_players(_engine_for(url), list(appids))
 
 
+COUNTRY = config.load_games().country   # main storefront region; extra regions are only compared
+
+
 @st.cache_data(ttl=300)
 def q_prices(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
-    return analysis.load_prices(_engine_for(url), list(appids))
+    return analysis.load_prices(_engine_for(url), list(appids), country=COUNTRY)
+
+
+@st.cache_data(ttl=300)
+def q_latest_prices_all_regions(url: str, appids: tuple[int, ...], days: int = 3) -> pd.DataFrame:
+    return analysis.load_prices(_engine_for(url), list(appids), start=db.utcnow() - timedelta(days=days))
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def fx_rates(base: str) -> dict[str, float]:
+    """ECB reference rates via frankfurter.app (no key). Empty if unavailable."""
+    try:
+        resp = requests.get("https://api.frankfurter.app/latest", params={"from": base}, timeout=10)
+        resp.raise_for_status()
+        return {k: float(v) for k, v in resp.json().get("rates", {}).items()}
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=300)
@@ -412,6 +431,28 @@ with tab_prices:
                 ["Game", "start", "end", "discount_pct", "Duration (days)", "ongoing"]].rename(
                 columns={"start": f"Start ({TZ_LABEL})", "end": f"End ({TZ_LABEL})",
                          "discount_pct": "Max discount %", "ongoing": "Ongoing"}), hide_index=True, width="stretch")
+
+        regional = q_latest_prices_all_regions(DB_URL, ids)
+        if not regional.empty and regional["country"].nunique() > 1:
+            st.subheader("Regional prices")
+            main_cur = (prices_r["currency"].dropna().iloc[-1] if prices_r["currency"].notna().any() else None)
+            rates = fx_rates(main_cur) if main_cur else {}
+            reg = analysis.regional_prices(regional, COUNTRY, rates, main_cur)
+            reg.insert(0, "Game", reg["appid"].map(NAME))
+            reg["Price"] = [("Free" if f else f"{p:.2f} {c or ''}") for f, p, c in
+                            zip(reg["is_free"], reg["final"], reg["currency"])]
+            reg["Region"] = reg["country"].str.upper() + [" (main)" if c == COUNTRY else "" for c in reg["country"]]
+            reg["Cheapest"] = reg["cheapest"].map({True: "✓", False: ""})
+            st.dataframe(reg[["Game", "Region", "Price", "discount_pct", "converted", "vs_main_pct", "Cheapest"]]
+                         .rename(columns={"discount_pct": "Discount %", "converted": f"In {main_cur}",
+                                          "vs_main_pct": f"vs {COUNTRY.upper()}"}),
+                         hide_index=True, width="stretch",
+                         column_config={f"In {main_cur}": st.column_config.NumberColumn(format="%.2f"),
+                                        f"vs {COUNTRY.upper()}": st.column_config.NumberColumn(format="%+.0f%%")})
+            st.caption("Latest store price per region, converted with today's ECB reference rates "
+                       f"({'frankfurter.app' if rates else 'unavailable right now, so no conversion'}). "
+                       "Before tax differences and regional payment fees; Steam may restrict buying from another "
+                       "region. Extra regions are set by `extra_countries` in games.toml.")
 
         st.subheader("Next sale")
         seasonal = analysis.next_seasonal_sale(db.utcnow())

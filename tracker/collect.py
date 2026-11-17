@@ -19,7 +19,7 @@ from .steam import (PriceInfo, SteamClient, classify_news, parse_owner_range, pa
 log = logging.getLogger(__name__)
 
 METADATA_MAX_AGE = timedelta(days=7)
-ALL_STEPS = ("metadata", "players", "prices", "news", "owners", "reviews", "sentiment",
+ALL_STEPS = ("metadata", "players", "prices", "regional_prices", "news", "owners", "reviews", "sentiment",
              "alerts")  # alerts run last
 
 
@@ -127,16 +127,25 @@ def collect_players(engine: Engine, client: SteamClient, appids: list[int], ts: 
 
 
 def collect_prices(engine: Engine, client: SteamClient, appids: list[int], country: str,
-                   ts: datetime, stats: RunStats) -> None:
+                   ts: datetime, stats: RunStats, detect_events: bool = True) -> None:
+    """detect_events=False for extra regions: their snapshots are stored for comparison,
+    but sales are only derived from the main country so they aren't counted twice."""
     prices = client.prices(appids, country)
     for appid in appids:
         info = prices.get(appid)
         if info is None:
-            stats.failures.append(f"prices:{appid}")
+            stats.failures.append(f"prices:{appid}" + ("" if detect_events else f":{country}"))
             continue
         prev = db.latest_price(engine, appid, country)
         if prev and prev["ts"] >= ts:
             continue  # already sampled this hour
+        if not detect_events:
+            db.insert_ignore(engine, db.price_snapshots, [{
+                "appid": appid, "ts": ts, "country": country, "currency": info.currency,
+                "initial_cents": info.initial_cents, "final_cents": info.final_cents,
+                "discount_pct": info.discount_pct, "is_free": info.is_free,
+            }])
+            continue
         event_rows = [{
             "appid": appid, "ts": ts, "kind": kind, "title": title, "url": None,
             "detail": json.dumps(detail), "source_id": f"{country}:{ts.isoformat()}",
@@ -238,6 +247,8 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         "metadata": lambda: sync_metadata(engine, client, appids, games.country, stats),
         "players": lambda: collect_players(engine, client, appids, ts, stats),
         "prices": lambda: collect_prices(engine, client, appids, games.country, ts, stats),
+        "regional_prices": lambda: [collect_prices(engine, client, appids, c, ts, stats, detect_events=False)
+                                    for c in games.extra_countries],
         "news": lambda: collect_news(engine, client, appids, stats),
         "owners": lambda: collect_owners(engine, client, appids, ts, stats),
         "reviews": lambda: collect_reviews(engine, client, appids, games.country, ts, stats),
@@ -263,7 +274,7 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         if send_alerts is not None:
             from . import alerts
             try:  # alerts must never fail the collection run
-                alerts.process(engine, games.alerts, appids, send_alerts, now=db.utcnow())
+                alerts.process(engine, games.alerts, appids, send_alerts, now=db.utcnow(), country=games.country)
             except Exception:
                 log.exception("Alerts failed")
     return stats

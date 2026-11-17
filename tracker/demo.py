@@ -73,6 +73,12 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
             final = round(price * (100 - disc) / 100)
             prices.append({"appid": appid, "ts": ts, "country": "us", "currency": "USD",
                            "initial_cents": price, "final_cents": final, "discount_pct": disc, "is_free": False})
+            if ts.hour == 0:  # extra regions, daily is enough for the demo
+                for cc, cur, mult in (("gb", "GBP", 0.8), ("de", "EUR", 0.95)):
+                    base_local = round(price * mult / 100) * 100 - 1
+                    prices.append({"appid": appid, "ts": ts, "country": cc, "currency": cur,
+                                   "initial_cents": base_local, "final_cents": round(base_local * (100 - disc) / 100),
+                                   "discount_pct": disc, "is_free": False})
             if disc != prev_disc:
                 kind = "sale_start" if prev_disc == 0 else ("sale_end" if disc == 0 else "sale_change")
                 title = f"{disc}% off - {final / 100:.2f} USD" if disc else f"Sale ended - back to {price / 100:.2f} USD"

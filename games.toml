@@ -3,6 +3,8 @@
 #
 # country: storefront region used for prices (ISO 3166 code, e.g. us, gb, de, br)
 country = "us"
+# Extra storefront regions to compare prices with (snapshots only: sales, alerts and charts use `country`).
+extra_countries = ["gb", "de", "br"]
 
 # Discord alerts (sent only when the DISCORD_WEBHOOK_URL secret is set).
 [alerts]

@@ -42,7 +42,9 @@ Either use the dashboard's **Manage games** tab (search by name, click *Track* o
 
 The collector tracks the games in `games.toml`, plus games added in the dashboard, minus games removed there.
 Removing a game stops collection and hides it, but keeps its history. Changes apply from the next hourly run.
-`country` in `games.toml` sets the storefront region (and currency) for prices.
+`country` in `games.toml` sets the storefront region (and currency) for prices. `extra_countries` adds regions whose prices are
+stored for comparison only (the *Regional prices* table converts them to your currency with ECB rates from
+frankfurter.app and marks the cheapest region); sales, alerts and charts use `country`.
 
 ## What gets collected
 
@@ -211,6 +213,5 @@ Run tests with `pytest -q`.
 
 - Steam reports *current* players only, so there is no backfill. History starts when you start collecting.
   For long-range context, sites like SteamDB and SteamCharts have archives (check their terms before scraping).
-- One storefront region per run. To track several regions, run with different `GAMES_FILE`s, each setting its own
-  `country`. Prices are stored per country.
+- Sales are detected in the main `country` only; `extra_countries` are price snapshots for comparison.
 - Owner counts from SteamSpy are estimates, and SteamSpy's accuracy has varied since Steam's 2018 privacy changes.

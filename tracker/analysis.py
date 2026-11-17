@@ -42,9 +42,12 @@ def load_players(engine: Engine, appids: list[int], start: datetime | None = Non
 
 
 def load_prices(engine: Engine, appids: list[int], start: datetime | None = None,
-                end: datetime | None = None) -> pd.DataFrame:
+                end: datetime | None = None, country: str | None = None) -> pd.DataFrame:
+    """country=None loads every region; pass the main country for charts and sale analysis."""
     t = db.price_snapshots
     q = select(t).where(t.c.appid.in_(appids)).order_by(t.c.ts)
+    if country:
+        q = q.where(t.c.country == country)
     if start:
         q = q.where(t.c.ts >= start)
     if end:
@@ -658,3 +661,34 @@ def review_bombs(sent: pd.DataFrame, events: pd.DataFrame | None = None, min_neg
                          "negative_share": r["new_negative"] / total * 100 if total else None,
                          "related_event": related})
     return pd.DataFrame(rows, columns=cols)
+
+
+def regional_prices(prices: pd.DataFrame, main_country: str, rates: dict[str, float] | None = None,
+                    base_currency: str | None = None) -> pd.DataFrame:
+    """Latest price per game and region, converted to `base_currency` with `rates`
+    (units of each currency per 1 base unit). `vs_main_pct` compares with the main
+    region; missing rates leave the converted price empty."""
+    cols = ["appid", "country", "currency", "final", "initial", "discount_pct", "is_free", "converted",
+            "vs_main_pct", "cheapest"]
+    if prices.empty:
+        return pd.DataFrame(columns=cols)
+    latest = prices.sort_values("ts").groupby(["appid", "country"]).tail(1).copy()
+    rates = dict(rates or {})
+    if base_currency:
+        rates[base_currency] = 1.0
+
+    def conv(r):
+        if r["is_free"]:
+            return 0.0
+        rate = rates.get(r["currency"]) if base_currency else None
+        return r["final"] / rate if rate else None
+
+    latest["converted"] = latest.apply(conv, axis=1)
+    main = latest[latest["country"] == main_country].set_index("appid")["converted"]
+    latest["vs_main_pct"] = [(c / main.get(a) - 1) * 100 if c is not None and pd.notna(c) and main.get(a) else None
+                             for a, c in zip(latest["appid"], latest["converted"])]
+    paid = latest[~latest["is_free"].astype(bool) & latest["converted"].notna()]
+    cheapest = paid.loc[paid.groupby("appid")["converted"].idxmin(), ["appid", "country"]] if not paid.empty else paid
+    latest["cheapest"] = list(zip(latest["appid"], latest["country"]))
+    latest["cheapest"] = latest["cheapest"].isin(set(zip(cheapest["appid"], cheapest["country"])))
+    return latest[cols].sort_values(["appid", "country"], ignore_index=True)

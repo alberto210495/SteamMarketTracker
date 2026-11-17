@@ -237,7 +237,7 @@ def bomb_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], now: datet
 
 # --------------------------------------------------------------------------- daily summary
 
-def summary_embed(engine: Engine, appids: list[int], now: datetime) -> dict | None:
+def summary_embed(engine: Engine, appids: list[int], now: datetime, country: str | None = None) -> dict | None:
     t, p = db.player_snapshots, db.price_snapshots
     names = _names(engine)
     lines = []
@@ -247,7 +247,10 @@ def summary_embed(engine: Engine, appids: list[int], now: datetime) -> dict | No
                 t.c.appid == appid, t.c.ts > now - timedelta(hours=24))).scalar()
             prev = conn.execute(select(func.max(t.c.players)).where(
                 t.c.appid == appid, t.c.ts > now - timedelta(hours=48), t.c.ts <= now - timedelta(hours=24))).scalar()
-            price = conn.execute(select(p).where(p.c.appid == appid).order_by(p.c.ts.desc()).limit(1)).mappings().first()
+            pq = select(p).where(p.c.appid == appid)
+            if country:
+                pq = pq.where(p.c.country == country)
+            price = conn.execute(pq.order_by(p.c.ts.desc()).limit(1)).mappings().first()
         if peak is None:
             continue
         change = f" ({(peak - prev) / prev * 100:+.0f}%)" if prev else ""
@@ -273,7 +276,8 @@ def summary_embed(engine: Engine, appids: list[int], now: datetime) -> dict | No
 
 # --------------------------------------------------------------------------- entry point
 
-def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, now: datetime | None = None) -> AlertStats:
+def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, now: datetime | None = None,
+            country: str | None = None) -> AlertStats:
     now = now or db.utcnow()
     stats = AlertStats()
 
@@ -319,7 +323,7 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
         key, today = "alerts.daily_summary", now.date().isoformat()
         try:
             if db.get_state(engine, key) != today:
-                embed = summary_embed(engine, appids, now)
+                embed = summary_embed(engine, appids, now, country)
                 if embed and send([embed]):
                     db.set_state(engine, key, today)
                     stats.summary = True
