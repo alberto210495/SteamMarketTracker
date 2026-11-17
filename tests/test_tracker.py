@@ -514,3 +514,19 @@ def test_predict_next_sales_from_regular_gaps():
     assert out["sales_seen"] == 4 and out["median_gap_days"] == pytest.approx(30)
     assert out["predicted_next"] == pd.Timestamp("2026-05-02") and out["confidence"] == "high"
     assert not out["on_sale_now"]
+
+
+def test_health_scores_components():
+    # players +20% in the last week, flat reviews, 90% positive
+    end = pd.Timestamp("2026-03-29")
+    players = hourly(1, "2026-03-01", 28, lambda t: 1200 if t > end - timedelta(days=7) else 1000)
+    reviews = pd.DataFrame({"appid": 1, "date": pd.date_range("2026-03-01", periods=28, freq="D"),
+                            "total_reviews": range(28), "new_reviews": 10.0})
+    owners = pd.DataFrame([{"appid": 1, "date": pd.Timestamp("2026-03-28"), "positive": 900, "negative": 100}])
+    h = analysis.health_scores(players, reviews, owners).iloc[0]
+    assert h["momentum_pct"] == pytest.approx(20, abs=1) and h["momentum_score"] == pytest.approx(75, abs=2)
+    assert h["velocity_score"] == pytest.approx(50) and h["quality_score"] == pytest.approx(80)
+    assert h["health"] == pytest.approx(0.4 * h["momentum_score"] + 0.2 * 50 + 0.4 * 80)
+    # only quality available -> health = quality
+    h2 = analysis.health_scores(players.iloc[:0], reviews.iloc[:0], owners).iloc[0]
+    assert h2["health"] == pytest.approx(80) and h2["components"] == 1

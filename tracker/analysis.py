@@ -517,3 +517,71 @@ def index_series(df: pd.DataFrame, value: str = "players") -> pd.DataFrame:
     first = df.groupby("appid")[value].transform(lambda s: s[s > 0].iloc[0] if (s > 0).any() else float("nan"))
     df["index"] = df[value] / first * 100
     return df
+
+
+HEALTH_WEIGHTS = {"momentum": 0.4, "velocity": 0.2, "quality": 0.4}
+
+
+def _trend_score(recent: float | None, prior: float | None) -> tuple[float | None, float | None]:
+    """(score 0-100, change %) where 50 = flat, 0 = -40% or worse, 100 = +40% or better."""
+    if recent is None or prior is None or pd.isna(recent) or pd.isna(prior) or prior <= 0:
+        return None, None
+    change = recent / prior - 1
+    return float(min(100, max(0, 50 + change * 125))), change * 100
+
+
+def health_scores(players: pd.DataFrame, reviews: pd.DataFrame, owners: pd.DataFrame,
+                  sentiment: pd.DataFrame | None = None) -> pd.DataFrame:
+    """One 0-100 number per game:
+      - momentum (40%): average daily peak, last 7 days vs. the 21 days before
+      - velocity (20%): new Steam reviews per day, same windows
+      - quality  (40%): % positive reviews (Steam's own totals if collected, else SteamSpy);
+                        50% positive -> 0, 100% -> 100
+    Missing components are left out and the weights re-normalised.
+    """
+    cols = ["appid", "health", "momentum_score", "momentum_pct", "velocity_score", "velocity_pct",
+            "quality_score", "positive_pct", "components"]
+    appids = set(players["appid"]) | set(reviews.get("appid", [])) | set(owners.get("appid", []))
+    rows = []
+    for appid in sorted(appids):
+        comp: dict[str, float] = {}
+        row = {"appid": appid}
+        p = players[players["appid"] == appid]
+        if not p.empty:
+            daily = p.set_index("ts")["players"].resample("1D").max().dropna()
+            end = daily.index.max()
+            recent = daily[daily.index > end - timedelta(days=7)]
+            prior = daily[(daily.index <= end - timedelta(days=7)) & (daily.index > end - timedelta(days=28))]
+            if len(recent) >= 3 and len(prior) >= 7:
+                row["momentum_score"], row["momentum_pct"] = _trend_score(recent.mean(), prior.mean())
+        r = reviews[reviews["appid"] == appid].dropna(subset=["new_reviews"]) if not reviews.empty else reviews
+        if not r.empty:
+            end = r["date"].max()
+            recent = r[r["date"] > end - timedelta(days=7)]["new_reviews"]
+            prior = r[(r["date"] <= end - timedelta(days=7)) & (r["date"] > end - timedelta(days=28))]["new_reviews"]
+            if len(recent) >= 3 and len(prior) >= 7:
+                row["velocity_score"], row["velocity_pct"] = _trend_score(recent.mean(), prior.mean())
+        pct = None
+        sent = sentiment[sentiment["appid"] == appid] if sentiment is not None and not sentiment.empty else None
+        if sent is not None and not sent.empty:
+            last = sent.sort_values("date").iloc[-1]
+            total = (last["total_positive"] or 0) + (last["total_negative"] or 0)
+            pct = last["total_positive"] / total * 100 if total else None
+        if pct is None and not owners.empty:
+            o = owners[owners["appid"] == appid].dropna(subset=["positive", "negative"])
+            o = o[(o["positive"] + o["negative"]) > 0]
+            if not o.empty:
+                last = o.sort_values("date").iloc[-1]
+                pct = last["positive"] / (last["positive"] + last["negative"]) * 100
+        if pct is not None:
+            row["positive_pct"] = pct
+            row["quality_score"] = float(min(100, max(0, (pct - 50) * 2)))
+        for key, col in (("momentum", "momentum_score"), ("velocity", "velocity_score"), ("quality", "quality_score")):
+            if row.get(col) is not None:
+                comp[key] = row[col]
+        if comp:
+            w = sum(HEALTH_WEIGHTS[k] for k in comp)
+            row["health"] = sum(HEALTH_WEIGHTS[k] * v for k, v in comp.items()) / w
+        row["components"] = len(comp)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=cols)

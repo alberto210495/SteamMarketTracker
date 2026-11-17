@@ -288,6 +288,7 @@ if not players.empty:
 
 
 def latest_table() -> pd.DataFrame:
+    health = analysis.health_scores(players, reviews, owners).set_index("appid")
     rows = []
     for a in ids:
         p = players[players["appid"] == a].sort_values("ts")
@@ -310,7 +311,8 @@ def latest_table() -> pd.DataFrame:
         if not ow.empty and pd.notna(ow.iloc[-1]["owners_low"]):
             o = ow.iloc[-1]
             own = f"{int(o['owners_low']):,} – {int(o['owners_high']):,}"
-        rows.append({"Game": NAME[a], "Players now": now_n, "24h peak": peak24, "7d peak vs prior 7d": wow,
+        h = health["health"].get(a) if a in health.index else None
+        rows.append({"Game": NAME[a], "Health": None if h is None or pd.isna(h) else round(h), "Players now": now_n, "24h peak": peak24, "7d peak vs prior 7d": wow,
                      "Price": price, "Discount": f"-{disc}%" if disc else "—", "Owners (SteamSpy)": own,
                      "Steam reviews": int(rv["total_reviews"].iloc[-1]) if not rv.empty else None})
     return pd.DataFrame(rows)
@@ -319,6 +321,10 @@ def latest_table() -> pd.DataFrame:
 st.dataframe(
     latest_table(), hide_index=True, width="stretch",
     column_config={
+        "Health": st.column_config.ProgressColumn(
+            min_value=0, max_value=100, format="%d",
+            help="0–100. Player momentum (7d vs prior 21d, 40%), new reviews per day (same windows, 20%) and "
+                 "% positive reviews (40%). 50 = flat. Details on the Owners & reviews tab."),
         "Players now": st.column_config.NumberColumn(format="localized"),
         "24h peak": st.column_config.NumberColumn(format="localized"),
         "7d peak vs prior 7d": st.column_config.NumberColumn(format="%+.1f%%"),
@@ -641,6 +647,22 @@ with tab_patterns:
 # --------------------------------------------------------------------------- owners
 
 with tab_owners:
+    hs = analysis.health_scores(players, reviews, owners)
+    if not hs.empty and hs["health"].notna().any():
+        st.subheader("Health score")
+        hs.insert(0, "Game", hs["appid"].map(NAME))
+        st.dataframe(hs.sort_values("health", ascending=False)[
+            ["Game", "health", "momentum_pct", "velocity_pct", "positive_pct", "components"]].rename(columns={
+                "health": "Health", "momentum_pct": "Players 7d vs prior 21d", "velocity_pct": "New reviews 7d vs prior 21d",
+                "positive_pct": "% positive", "components": "Parts available"}),
+            hide_index=True, width="stretch",
+            column_config={"Health": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+                           "Players 7d vs prior 21d": st.column_config.NumberColumn(format="%+.1f%%"),
+                           "New reviews 7d vs prior 21d": st.column_config.NumberColumn(format="%+.1f%%"),
+                           "% positive": st.column_config.NumberColumn(format="%.1f%%")})
+        st.caption("Health = 40% player momentum + 20% review velocity + 40% review quality, each 0–100 "
+                   "(trends: 50 = flat, ±40% maps to 0/100; quality: 50% positive = 0, 100% = 100). "
+                   "Parts without enough data are left out.")
     if owners.empty:
         st.info("No SteamSpy data yet (fetched once per day).")
     if not owners.empty:

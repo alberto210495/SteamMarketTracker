@@ -116,6 +116,10 @@ week, *half-life* (days until half the gain is gone) and days until players are 
 The **Patterns** tab shows each game's weekly rhythm: a weekday × hour heatmap of average players (in your time
 zone), the busiest and quietest hour, and how much busier weekends are.
 
+**Health score** (0–100, first column of the overview table; breakdown on *Owners & reviews*): 40% player momentum
+(average daily peak, last 7 days vs. the 21 before), 20% review velocity (new reviews per day, same windows) and 40%
+review quality (% positive). Trends score 50 when flat and 0/100 at ±40%; parts without enough data are left out.
+
 This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
 (a streamer, a trailer) won't show up in the market baseline.
 
