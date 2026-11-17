@@ -815,3 +815,29 @@ def follower_summary(games_df: pd.DataFrame, followers: pd.DataFrame, today: dat
                      "status": status, "release_guess": guess, "followers": now, "new_7d": n7, "new_30d": n30,
                      "growth_7d_pct": n7 / (now - n7) * 100 if n7 is not None and now and now - n7 > 0 else None})
     return pd.DataFrame(rows, columns=cols)
+
+
+def price_watch(prices: pd.DataFrame, targets: dict[int, float]) -> pd.DataFrame:
+    """Current price vs. all-time low (since tracking began) and the target, per game."""
+    cols = ["appid", "currency", "current", "discount_pct", "all_time_low", "atl_since", "target", "status"]
+    paid = prices[~prices["is_free"].astype(bool)] if not prices.empty else prices
+    if paid.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for appid, g in paid.sort_values("ts").groupby("appid"):
+        last = g.iloc[-1]
+        g = g[g["currency"] == last["currency"]]
+        atl = g["final"].min()
+        target = targets.get(appid)
+        if target is not None and last["final"] <= target:
+            status = "at or below target"
+        elif last["final"] <= atl and last["discount_pct"]:
+            status = "at all-time low"
+        elif last["discount_pct"]:
+            status = "on sale"
+        else:
+            status = ""
+        rows.append({"appid": appid, "currency": last["currency"], "current": last["final"],
+                     "discount_pct": int(last["discount_pct"] or 0), "all_time_low": atl,
+                     "atl_since": g["ts"].min(), "target": target, "status": status})
+    return pd.DataFrame(rows, columns=cols)

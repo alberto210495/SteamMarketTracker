@@ -724,3 +724,62 @@ def test_follower_summary_growth():
     s = analysis.follower_summary(games_df, f, datetime(2026, 2, 1)).iloc[0]
     assert s["status"] == "upcoming" and s["followers"] == 1300
     assert s["new_7d"] == 70 and s["new_30d"] == 300
+
+
+
+# --------------------------------------------------------------------------- price watch alerts
+
+def _prices(engine, appid, start, finals, base=2000, currency="USD", country="us"):
+    db.insert_ignore(engine, db.price_snapshots, [{
+        "appid": appid, "ts": start + timedelta(days=i), "country": country, "currency": currency,
+        "initial_cents": base, "final_cents": f, "discount_pct": round((1 - f / base) * 100), "is_free": False,
+    } for i, f in enumerate(finals)])
+
+
+PRICE_ONLY = AlertsConfig(sales=False, patches=False, spikes=False, daily_summary=False, review_bombs=False,
+                          atl_min_history_days=30)
+
+
+def test_price_target_alert_once_per_drop(engine):
+    _seed_game(engine)
+    start = datetime(2026, 1, 1, 12)
+    _prices(engine, 1, start, [2000, 2000, 900])
+    send = FakeSender()
+    now = start + timedelta(days=2)
+    cfg = AlertsConfig(**{**PRICE_ONLY.__dict__, "all_time_lows": False})
+    alerts_mod.process(engine, cfg, [1], send, now=now, country="us", targets={1: 9.99})
+    assert send.titles == ["Price target hit: Game 1"]
+    alerts_mod.process(engine, cfg, [1], send, now=now, country="us", targets={1: 9.99})   # still low: no repeat
+    assert len(send.calls) == 1
+    _prices(engine, 1, start + timedelta(days=3), [2000])                                  # back up...
+    alerts_mod.process(engine, cfg, [1], send, now=start + timedelta(days=3), country="us", targets={1: 9.99})
+    _prices(engine, 1, start + timedelta(days=4), [900])                                   # ...and down again
+    alerts_mod.process(engine, cfg, [1], send, now=start + timedelta(days=4), country="us", targets={1: 9.99})
+    assert len(send.calls) == 2
+
+
+def test_all_time_low_alert_needs_history(engine):
+    _seed_game(engine)
+    start = datetime(2026, 1, 1, 12)
+    _prices(engine, 1, start, [2000] * 10 + [1500] + [2000] * 5 + [1000])     # 16 days of history: too short
+    send = FakeSender()
+    alerts_mod.process(engine, PRICE_ONLY, [1], send, now=start + timedelta(days=16), country="us")
+    assert send.calls == []
+    _prices(engine, 1, start + timedelta(days=17), [2000] * 14 + [1000])       # day 31: matches the low
+    alerts_mod.process(engine, PRICE_ONLY, [1], send, now=start + timedelta(days=31), country="us")
+    assert send.titles == ["All-time low: Game 1"]
+    assert "Matches" in send.calls[0][0]["description"]
+    _prices(engine, 1, start + timedelta(days=32), [800])
+    alerts_mod.process(engine, PRICE_ONLY, [1], send, now=start + timedelta(days=32), country="us")
+    assert "New all-time low" in send.calls[1][0]["description"]
+
+
+def test_price_watch_table_and_targets_config(tmp_path):
+    ts = pd.date_range("2026-01-01", periods=3, freq="D")
+    prices = pd.DataFrame({"appid": 1, "ts": ts, "currency": "USD", "final": [20.0, 10.0, 12.0],
+                           "discount_pct": [0, 50, 40], "is_free": False})
+    row = analysis.price_watch(prices, {1: 12.5}).iloc[0]
+    assert row["all_time_low"] == 10 and row["status"] == "at or below target"
+    p = tmp_path / "g.toml"
+    p.write_text('[[games]]\nappid = 1\ntarget_price = 9.99\n[[games]]\nappid = 2\n')
+    assert config.load_games(p).targets == {1: 9.99}

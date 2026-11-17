@@ -4,6 +4,7 @@
 - spikes: latest players vs. the median for the same hour of day over 14 days
 - daily summary: once per UTC day, on the first run at or after the configured hour
 - review bombs: the latest day's new negative reviews far above the usual level
+- price watch: a game at or below its target price, or at its all-time low (once per drop)
 
 No pandas here: this runs in the scheduled job with requirements-worker.txt only.
 A failed Discord send never advances the bookkeeping, so nothing is lost.
@@ -37,6 +38,7 @@ PATCH_KINDS = ("patch",)
 COLORS = {  # Discord embed sidebar colours
     "sale_start": 0x1BAF7A, "sale_change": 0x1BAF7A, "sale_end": 0x898781, "price_change": 0xEDA100,
     "patch": 0x2A78D6, "spike": 0xEB6834, "summary": 0x6250D6, "test": 0x2A78D6, "bomb": 0xE34948,
+    "target": 0x1BAF7A, "atl": 0x008300,
 }
 LABELS = {"sale_start": "On sale", "sale_end": "Sale ended", "sale_change": "Discount changed",
           "price_change": "Price change", "patch": "New patch"}
@@ -81,6 +83,7 @@ class AlertStats:
     events: int = 0
     spikes: int = 0
     bombs: int = 0
+    price_watch: int = 0
     summary: bool = False
     failures: list[str] = field(default_factory=list)
 
@@ -235,6 +238,66 @@ def bomb_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], now: datet
     return embeds, marks
 
 
+# --------------------------------------------------------------------------- price watch
+
+def _money(cents: int | None, currency: str | None) -> str:
+    return "?" if cents is None else f"{cents / 100:.2f} {currency or ''}".strip()
+
+
+def price_watch_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], targets: dict[int, float],
+                       country: str | None, now: datetime) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Target-price and all-time-low alerts. Returns embeds and state updates; state is
+    also cleared (without an alert) when the price goes back up, so the next drop alerts again."""
+    p = db.price_snapshots
+    names = _names(engine)
+    embeds, updates = [], []
+    for appid in appids:
+        q = select(p).where(p.c.appid == appid)
+        if country:
+            q = q.where(p.c.country == country)
+        with engine.connect() as conn:
+            latest = conn.execute(q.order_by(p.c.ts.desc()).limit(1)).mappings().first()
+            if not latest or latest["is_free"] or latest["final_cents"] is None or latest["ts"] < now - timedelta(hours=3):
+                continue
+            hist = conn.execute(select(func.min(p.c.final_cents), func.min(p.c.ts)).where(
+                p.c.appid == appid, p.c.ts < latest["ts"], p.c.currency == latest["currency"], ~p.c.is_free,
+                *( [p.c.country == country] if country else []))).first()
+        final, cur, name = latest["final_cents"], latest["currency"], names.get(appid, appid)
+        disc = f" (-{latest['discount_pct']}%)" if latest["discount_pct"] else ""
+
+        target = targets.get(appid)
+        if cfg.price_targets and target is not None:
+            key = f"alerts.target.{appid}"
+            hit = final <= round(target * 100)
+            state = db.get_state(engine, key)
+            if hit and state != "hit":
+                embeds.append({"title": f"Price target hit: {name}",
+                               "description": f"Now **{_money(final, cur)}**{disc}, at or below your target of "
+                                              f"{target:.2f} {cur or ''}.".rstrip(),
+                               "url": store_url(appid), "color": COLORS["target"],
+                               "timestamp": latest["ts"].isoformat() + "Z"})
+                updates.append((key, "hit"))
+            elif not hit and state == "hit":
+                db.set_state(engine, key, "")
+
+        prev_min, first_ts = (hist or (None, None))
+        if cfg.all_time_lows and prev_min is not None and first_ts is not None:
+            key = f"alerts.atl.{appid}"
+            state = db.get_state(engine, key)
+            enough = latest["ts"] - first_ts >= timedelta(days=cfg.atl_min_history_days)
+            if final <= prev_min and latest["discount_pct"] and enough and state != str(final):
+                what = "New all-time low" if final < prev_min else "Matches its all-time low"
+                embeds.append({"title": f"All-time low: {name}",
+                               "description": f"{what}: **{_money(final, cur)}**{disc}"
+                                              + (f", previous low {_money(prev_min, cur)}." if final < prev_min else "."),
+                               "url": store_url(appid), "color": COLORS["atl"],
+                               "timestamp": latest["ts"].isoformat() + "Z"})
+                updates.append((key, str(final)))
+            elif final > prev_min and state:
+                db.set_state(engine, key, "")
+    return embeds, updates
+
+
 # --------------------------------------------------------------------------- daily summary
 
 def summary_embed(engine: Engine, appids: list[int], now: datetime, country: str | None = None) -> dict | None:
@@ -277,7 +340,7 @@ def summary_embed(engine: Engine, appids: list[int], now: datetime, country: str
 # --------------------------------------------------------------------------- entry point
 
 def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, now: datetime | None = None,
-            country: str | None = None) -> AlertStats:
+            country: str | None = None, targets: dict[int, float] | None = None) -> AlertStats:
     now = now or db.utcnow()
     stats = AlertStats()
 
@@ -306,6 +369,19 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
             log.exception("Spike alerts failed")
             stats.failures.append("spikes")
 
+    if cfg.price_targets or cfg.all_time_lows:
+        try:
+            embeds, updates = price_watch_embeds(engine, cfg, appids, targets or {}, country, now)
+            if embeds and send(embeds):
+                for k, v in updates:
+                    db.set_state(engine, k, v)
+                stats.price_watch = len(embeds)
+            elif embeds:
+                stats.failures.append("price_watch")
+        except Exception:
+            log.exception("Price watch alerts failed")
+            stats.failures.append("price_watch")
+
     if cfg.review_bombs:
         try:
             embeds, marks = bomb_embeds(engine, cfg, appids, now)
@@ -333,8 +409,8 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
             log.exception("Daily summary failed")
             stats.failures.append("summary")
 
-    log.info("Alerts: events=%d spikes=%d bombs=%d summary=%s%s", stats.events, stats.spikes, stats.bombs,
-             stats.summary,
+    log.info("Alerts: events=%d spikes=%d bombs=%d price_watch=%d summary=%s%s", stats.events, stats.spikes,
+             stats.bombs, stats.price_watch, stats.summary,
              f" failures={stats.failures}" if stats.failures else "")
     return stats
 
@@ -342,7 +418,7 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
 def send_test(send: Sender) -> bool:
     return send([{
         "title": "Steam Tracker is connected",
-        "description": "Alerts for sales, patches, player spikes, review bombs and a daily summary will appear "
+        "description": "Alerts for sales, patches, price targets, player spikes, review bombs and a daily summary will appear "
                        "in this channel.",
         "color": COLORS["test"],
         "timestamp": db.utcnow().isoformat() + "Z",

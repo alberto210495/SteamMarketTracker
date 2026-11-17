@@ -38,6 +38,7 @@ class GamesConfig:
     appids: list[int] = field(default_factory=list)
     extra_countries: list[str] = field(default_factory=list)   # price snapshots only, no sale events
     twitch_names: dict[int, str] = field(default_factory=dict)  # appid -> Twitch category name override
+    targets: dict[int, float] = field(default_factory=dict)     # appid -> alert at or below this price
     alerts: "AlertsConfig" = field(default_factory=lambda: AlertsConfig())
 
 
@@ -53,6 +54,9 @@ class AlertsConfig:
     daily_summary_hour_utc: int = 14
     review_bombs: bool = True       # a day with far more negative reviews than usual
     review_bomb_min_negative: int = 30
+    price_targets: bool = True      # a game drops to or below its `target_price` in [[games]]
+    all_time_lows: bool = True      # a discounted game hits its lowest price since tracking began
+    atl_min_history_days: int = 30  # ...once there's at least this much price history
 
 
 def twitch_credentials() -> tuple[str, str] | None:
@@ -79,4 +83,7 @@ def load_games(path: Path | None = None) -> GamesConfig:
     extra = [str(c).lower() for c in raw.get("extra_countries") or []]
     extra = [c for i, c in enumerate(extra) if c != country and c not in extra[:i]]
     twitch = {int(g["appid"]): str(g["twitch_name"]) for g in raw.get("games", []) if g.get("twitch_name")}
-    return GamesConfig(country=country, appids=appids, alerts=alerts, extra_countries=extra, twitch_names=twitch)
+    targets = {int(g["appid"]): float(g["target_price"]) for g in raw.get("games", [])
+               if g.get("target_price") is not None}
+    return GamesConfig(country=country, appids=appids, alerts=alerts, extra_countries=extra, twitch_names=twitch,
+                       targets=targets)

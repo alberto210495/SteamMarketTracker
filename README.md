@@ -82,6 +82,8 @@ collection run posts:
 | Patch | new patch notes appear on Steam |
 | Player spike | players are ≥1.5× (and ≥200 above) the median for that hour of day over the last 14 days; at most one per game per 24h. Needs ~5 days of history to start. |
 | Review bomb | a day's new negative reviews are ≥30, the majority of that day's reviews, and ≥3× the usual daily negatives (14-day median) |
+| Price target | a game's price drops to or below its `target_price` (set per game in games.toml); once per drop |
+| All-time low | a discounted game reaches its lowest price since tracking began (after 30 days of history); once per drop |
 | Daily summary | once a day, first run after 14:00 UTC: each game's 24h peak, change vs. the day before, current price |
 
 Toggle each one and tune thresholds under `[alerts]` in [games.toml](games.toml). The first run with alerts

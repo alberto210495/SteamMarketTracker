@@ -321,7 +321,8 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         if send_alerts is not None:
             from . import alerts
             try:  # alerts must never fail the collection run
-                alerts.process(engine, games.alerts, appids, send_alerts, now=db.utcnow(), country=games.country)
+                alerts.process(engine, games.alerts, appids, send_alerts, now=db.utcnow(), country=games.country,
+                               targets=games.targets)
             except Exception:
                 log.exception("Alerts failed")
     return stats

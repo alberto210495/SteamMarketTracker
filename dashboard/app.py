@@ -458,6 +458,20 @@ with tab_prices:
                 columns={"start": f"Start ({TZ_LABEL})", "end": f"End ({TZ_LABEL})",
                          "discount_pct": "Max discount %", "ongoing": "Ongoing"}), hide_index=True, width="stretch")
 
+        st.subheader("Price watch")
+        pw = analysis.price_watch(q_prices(DB_URL, ids), config.load_games().targets)
+        if not pw.empty:
+            pw = analysis.to_timezone(pw, ["atl_since"], TZ)
+            pw.insert(0, "Game", pw["appid"].map(NAME))
+            st.dataframe(pw[["Game", "current", "discount_pct", "all_time_low", "target", "status", "atl_since"]]
+                         .rename(columns={"current": "Now", "discount_pct": "Discount %", "all_time_low": "Lowest tracked",
+                                          "target": "Target", "status": "Status", "atl_since": "Tracked since"}),
+                         hide_index=True, width="stretch",
+                         column_config={c: st.column_config.NumberColumn(format="%.2f")
+                                        for c in ("Now", "Lowest tracked", "Target")})
+            st.caption("Discord alerts fire when a game reaches its `target_price` (set per game in games.toml) or "
+                       "its lowest price since tracking began, once per drop.")
+
         regional = q_latest_prices_all_regions(DB_URL, ids)
         if not regional.empty and regional["country"].nunique() > 1:
             st.subheader("Regional prices")
