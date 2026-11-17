@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -92,6 +93,45 @@ def show(fig: go.Figure, title: str | None = None) -> None:
     if title:
         st.markdown(f"**{title}**")
     st.plotly_chart(fig, width="stretch", theme=None, config={"displaylogo": False})
+
+
+def _with_names(df: pd.DataFrame) -> pd.DataFrame:
+    if "appid" in df and "Game" not in df and "game" not in df:
+        df = df.copy()
+        df.insert(0, "Game", df["appid"].map(lambda a: ALL_NAMES.get(int(a), a) if pd.notna(a) else a))
+    return df
+
+
+def to_xlsx(tables: dict[str, pd.DataFrame]) -> bytes:
+    import io
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+        used: set[str] = set()
+        for name, df in tables.items():
+            sheet = re.sub(r"[\[\]:*?/\\]", "", name)[:31] or "Sheet"
+            while sheet in used:
+                sheet = sheet[:28] + f"_{len(used)}"
+            used.add(sheet)
+            _with_names(df).to_excel(xl, sheet_name=sheet, index=False)
+    return buf.getvalue()
+
+
+def export_buttons(tables: dict[str, pd.DataFrame], name: str) -> None:
+    """CSV of the tab's main table and an Excel workbook with every table on the tab.
+    Files are built only when clicked."""
+    tables = {k: v for k, v in tables.items() if isinstance(v, pd.DataFrame) and not v.empty}
+    if not tables:
+        return
+    first_name, first = next(iter(tables.items()))
+    st.divider()
+    c1, c2, c3 = st.columns([1, 1, 4])
+    c1.download_button("⬇ CSV", data=lambda: _with_names(first).to_csv(index=False).encode(),
+                       file_name=f"{name}.csv", mime="text/csv", key=f"csv-{name}", on_click="ignore",
+                       help=f"{first_name}, as shown on this tab")
+    c2.download_button("⬇ Excel", data=lambda: to_xlsx(tables), file_name=f"{name}.xlsx", key=f"xlsx-{name}",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore",
+                       help="One sheet per table: " + ", ".join(tables))
+    c3.caption(f"Export: {', '.join(tables)}")
 
 
 def hex_rgba(hex_color: str, alpha: float) -> str:
@@ -370,6 +410,13 @@ st.dataframe(
     },
 )
 
+EXPORT: dict[str, dict[str, pd.DataFrame]] = {
+    "players": {"Players (chart)": players_view, "Players hourly": players_r, "Twitch": in_range(twitch)},
+    "prices": {"Prices": prices_r, "Market-wide sales": market_sales},
+    "impact": {}, "compare": {}, "patterns": {},
+    "owners": {"Owners (SteamSpy)": owners, "Review totals": reviews, "Review split": sentiment},
+}
+
 tab_players, tab_prices, tab_impact, tab_compare, tab_patterns, tab_owners, tab_data, tab_manage = st.tabs(
     ["Players", "Prices & sales", "Event impact", "Compare trends", "Patterns", "Owners & reviews", "Data",
      "Manage games"])
@@ -429,6 +476,8 @@ with tab_players:
                                               text="Twitch viewers", font=dict(color=C["muted"]))))
         show(fig, title=NAME[a])
 
+    export_buttons(EXPORT["players"], "players")
+
 # --------------------------------------------------------------------------- prices
 
 with tab_prices:
@@ -449,6 +498,7 @@ with tab_prices:
         show(style(fig, height=380, y_title=f"Price ({cur})"), title="Store price over time")
 
         sale_tbl = sales[sales["appid"].isin(ids)].copy()
+        EXPORT["prices"]["Sales"] = sale_tbl
         if not sale_tbl.empty:
             sale_tbl["Game"] = sale_tbl["appid"].map(NAME)
             sale_tbl["Duration (days)"] = ((sale_tbl["end"] - sale_tbl["start"]).dt.total_seconds() / 86400).round(1)
@@ -460,6 +510,7 @@ with tab_prices:
 
         st.subheader("Price watch")
         pw = analysis.price_watch(q_prices(DB_URL, ids), config.load_games().targets)
+        EXPORT["prices"]["Price watch"] = pw
         if not pw.empty:
             pw = analysis.to_timezone(pw, ["atl_since"], TZ)
             pw.insert(0, "Game", pw["appid"].map(NAME))
@@ -478,6 +529,7 @@ with tab_prices:
             main_cur = (prices_r["currency"].dropna().iloc[-1] if prices_r["currency"].notna().any() else None)
             rates = fx_rates(main_cur) if main_cur else {}
             reg = analysis.regional_prices(regional, COUNTRY, rates, main_cur)
+            EXPORT["prices"]["Regional prices"] = reg
             reg.insert(0, "Game", reg["appid"].map(NAME))
             reg["Price"] = [("Free" if f else f"{p:.2f} {c or ''}") for f, p, c in
                             zip(reg["is_free"], reg["final"], reg["currency"])]
@@ -501,6 +553,7 @@ with tab_prices:
                    "schedule; exact dates are announced a few weeks ahead).")
         pred = analysis.predict_next_sales(q_events(DB_URL, ids), analysis.market_sale_periods(
             q_prices(DB_URL, tuple(NAME))), now=db.utcnow())
+        EXPORT["prices"]["Next sale"] = pred
         if pred.empty:
             st.caption("Per-game predictions appear once a game has had two sales.")
         else:
@@ -525,6 +578,7 @@ with tab_prices:
         st.subheader("Sale effectiveness")
         effect = analysis.sale_effectiveness(players, events, window_days=window, market_players=all_players,
                                              now=end)
+        EXPORT["prices"]["Sale effectiveness"] = effect
         if effect.empty:
             st.caption("Appears once a sale has player data around its start.")
         else:
@@ -578,6 +632,8 @@ with tab_prices:
                                            "share": "% of paid games on sale", "games_on_sale": "Games on sale"}),
                          hide_index=True, width="stretch")
 
+    export_buttons(EXPORT["prices"], "prices")
+
 # --------------------------------------------------------------------------- impact
 
 with tab_impact:
@@ -594,6 +650,7 @@ with tab_impact:
                                 "everything doesn't count as this game's success.")
     ev = events[events["kind"].isin(kinds)] if not events.empty else events
     impact = analysis.event_impact(players, ev, window_days=window, market_players=all_players)
+    EXPORT["impact"]["Event impact"] = impact
     if impact.empty:
         st.info("No events with player data around them yet.")
     else:
@@ -638,6 +695,7 @@ with tab_impact:
                "week after. *Half-life* = days from the peak until half the gain is gone. *Back to baseline* = "
                "first day within 10% of the baseline (followed for up to 30 days).")
     retention = analysis.event_retention(players, ev, baseline_days=window)
+    EXPORT["impact"]["Retention"] = retention
     if retention.empty:
         st.info("No events with player data around them yet.")
     else:
@@ -662,6 +720,8 @@ with tab_impact:
                            "Peak": st.column_config.NumberColumn(format="localized"),
                            "Peak lift": st.column_config.NumberColumn(format="%+.1f%%")})
 
+    export_buttons(EXPORT["impact"], "event-impact")
+
 # --------------------------------------------------------------------------- compare
 
 with tab_compare:
@@ -669,6 +729,7 @@ with tab_compare:
                "share one axis. 150 = 50% above where it started.")
     daily = analysis.resample_players(players_r, "daily_peak")
     idx = analysis.with_gaps(analysis.index_series(daily), ["players", "index"], timedelta(days=1.5))
+    EXPORT["compare"]["Indexed daily peak"] = idx
     if idx.empty:
         st.info("No player samples in range.")
     else:
@@ -698,16 +759,20 @@ with tab_compare:
         fig.update_layout(margin=dict(r=170 if len(ids) <= 4 else 8))
         show(fig, title="Relative player trend")
 
+    export_buttons(EXPORT["compare"], "compare")
+
 # --------------------------------------------------------------------------- patterns
 
 with tab_patterns:
     st.caption(f"When each game's audience is online: average players by weekday and hour ({TZ_LABEL}), "
                "over the selected time range. 100 = an average hour for that game.")
     profile = analysis.weekly_profile(players_r)
+    EXPORT["patterns"]["Weekly profile"] = profile
     if profile.empty or profile["samples"].sum() < 24 * 7:
         st.info("Needs at least a week of hourly samples in the selected range.")
     else:
         summary = analysis.profile_summary(profile)
+        EXPORT["patterns"]["Busiest hours"] = summary
         summary.insert(0, "Game", summary["appid"].map(NAME))
         summary["Busiest"] = summary["peak_day"] + " " + summary["peak_hour"].map("{:02d}:00".format)
         summary["Quietest"] = summary["low_day"] + " " + summary["low_hour"].map("{:02d}:00".format)
@@ -733,6 +798,7 @@ with tab_patterns:
 
     st.subheader("Twitch vs. players")
     ll = analysis.twitch_lead_lag(players_r, twitch)
+    EXPORT["patterns"]["Twitch vs players"] = ll
     if ll.empty:
         st.caption("Needs 3+ days of hourly Twitch data (set `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` "
                    "for the collector).")
@@ -752,10 +818,13 @@ with tab_patterns:
                    "shifted up to 12 hours. *Viewers lead* with a clear correlation (0.3+) suggests streams "
                    "drive players, e.g. a big streamer picking the game up. Weak correlations mean no clear link.")
 
+    export_buttons(EXPORT["patterns"], "patterns")
+
 # --------------------------------------------------------------------------- owners
 
 with tab_owners:
     hs = analysis.health_scores(players, reviews, owners, sentiment)
+    EXPORT["owners"]["Health"] = hs
     if not hs.empty and hs["health"].notna().any():
         st.subheader("Health score")
         hs.insert(0, "Game", hs["appid"].map(NAME))
@@ -810,6 +879,7 @@ with tab_owners:
 
     st.subheader("Review sentiment (Steam)")
     weekly = analysis.weekly_sentiment(sentiment)
+    EXPORT["owners"]["Weekly sentiment"] = weekly
     if weekly.empty:
         st.caption("Collected once a day from Steam's review totals; the weekly % positive appears after two "
                    "daily snapshots.")
@@ -817,6 +887,7 @@ with tab_owners:
         st.caption("% positive of the reviews **written that week** (Steam's all-language totals), so a bad patch "
                    "shows up here long before it moves the all-time score. ✕ = review bomb.")
         bombs = analysis.review_bombs(sentiment, events)
+        EXPORT["owners"]["Review bombs"] = bombs
         fig = go.Figure()
         for a in ids:
             d = weekly[weekly["appid"] == a]
@@ -855,6 +926,7 @@ with tab_owners:
     st.subheader("Followers & upcoming releases")
     all_followers = q_followers(DB_URL, tuple(NAME))
     fsum = analysis.follower_summary(games[games["appid"].isin(list(NAME))], all_followers, db.utcnow())
+    EXPORT["owners"]["Followers"] = fsum
     upcoming = fsum[fsum["status"] == "upcoming"]
     if not upcoming.empty:
         st.markdown("**Upcoming:** " + ", ".join(
@@ -908,6 +980,8 @@ with tab_owners:
         fig.update_yaxes(type="log", rangemode="normal", tickformat="~s", dtick="D2")
         show(fig, title="New Steam reviews per day (log scale)")
 
+    export_buttons(EXPORT["owners"], "owners-reviews")
+
 # --------------------------------------------------------------------------- raw data
 
 with tab_data:
@@ -917,8 +991,16 @@ with tab_data:
     if "appid" in df and not df.empty:
         df.insert(0, "game", df["appid"].map(NAME))
     st.dataframe(df, hide_index=True, width="stretch")
-    st.download_button("Download CSV", df.to_csv(index=False).encode(), file_name=f"{choice.lower()}.csv",
+    c1, c2, _ = st.columns([1, 1, 3])
+    c1.download_button("⬇ CSV", df.to_csv(index=False).encode(), file_name=f"{choice.lower()}.csv",
                        mime="text/csv")
+    everything = {"Players": players_r, "Prices": prices_r, "Events": in_range(events) if not events.empty else events,
+                  "Owners": owners, "Review totals": reviews, "Review split": sentiment, "Twitch": in_range(twitch),
+                  "Followers": q_followers(DB_URL, ids)}
+    c2.download_button("⬇ Everything (Excel)", data=lambda: to_xlsx(
+        {k: v for k, v in everything.items() if not v.empty}), file_name="steam-tracker.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore",
+        help="All raw tables for the selected games and time range, one sheet each.")
 
 # --------------------------------------------------------------------------- manage games
 

@@ -147,6 +147,10 @@ review quality (% positive). Trends score 50 when flat and 0/100 at ±40%; parts
 This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
 (a streamer, a trailer) won't show up in the market baseline.
 
+Every tab ends with **⬇ CSV** (the tab's main table) and **⬇ Excel** (every table on the tab, one sheet each);
+the *Data* tab also downloads all raw tables for the selected games in one workbook. Files are built only when
+clicked.
+
 All times in the dashboard are shown in your browser's time zone by default (switchable in the sidebar); the
 database stores UTC.
 

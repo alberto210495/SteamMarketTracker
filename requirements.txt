@@ -1,7 +1,8 @@
 requests>=2.31
 SQLAlchemy>=2.0
 pandas>=2.1
-streamlit>=1.46
+streamlit>=1.60
 plotly>=5.20
+openpyxl>=3.1   # Excel export
 # Optional: only needed when DATABASE_URL points at PostgreSQL
 psycopg[binary]>=3.1
