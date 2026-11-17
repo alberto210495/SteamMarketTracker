@@ -463,3 +463,22 @@ def test_sale_effectiveness_lift_per_discount():
     assert row["lift_per_10pct"] == pytest.approx(10)
     brackets = analysis.discount_brackets(out)
     assert brackets.iloc[0]["bracket"] == "50–74%" and brackets.iloc[0]["sales"] == 1
+
+
+def test_event_retention_half_life_and_return():
+    ev_ts = pd.Timestamp("2026-03-10 00:00")
+    # +100% bump that decays by 20 points a day: 2000, 1800, ... back near 1000 on day 5
+    def f(t):
+        if t < ev_ts:
+            return 1000
+        d = (t - ev_ts).days
+        return int(1000 + max(0, 1000 - 200 * d))
+    players = hourly(1, "2026-03-01", 25, f)
+    events = pd.DataFrame([{"appid": 1, "ts": ev_ts, "kind": "patch", "title": "p"},
+                           {"appid": 1, "ts": pd.Timestamp("2026-03-20"), "kind": "manual", "title": "m"}])
+    out = analysis.event_retention(players, events, baseline_days=7).set_index("kind")
+    r = out.loc["patch"]
+    assert r["peak_lift_pct"] == pytest.approx(100) and r["days_to_peak"] == 0
+    assert r["half_life_days"] == 3          # 1400 is the first day within half of the +1000 gain
+    assert r["days_to_baseline"] == 5 and r["status"] == "back to baseline"
+    assert out.loc["manual", "status"] == "no bump"

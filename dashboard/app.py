@@ -511,6 +511,35 @@ with tab_impact:
                 "Vs market": st.column_config.NumberColumn(format="%+.1f%%"),
             })
 
+    st.subheader("How long bumps last")
+    st.caption(f"Baseline = average daily peak in the {window} days before. *Peak lift* = best day in the first "
+               "week after. *Half-life* = days from the peak until half the gain is gone. *Back to baseline* = "
+               "first day within 10% of the baseline (followed for up to 30 days).")
+    retention = analysis.event_retention(players, ev, baseline_days=window)
+    if retention.empty:
+        st.info("No events with player data around them yet.")
+    else:
+        retention.insert(0, "Game", retention["appid"].map(NAME))
+        bumps = retention[retention["status"].isin(["back to baseline", "still elevated"])]
+        if not bumps.empty:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Events with a bump", f"{len(bumps)} of {int((retention['status'] != 'not enough data').sum())}")
+            hl = bumps["half_life_days"].dropna()
+            c2.metric("Median half-life", f"{hl.median():.0f} days" if not hl.empty else "—")
+            back = bumps["days_to_baseline"].dropna()
+            c3.metric("Median days to baseline", f"{back.median():.0f}" if not back.empty else "—")
+        st.dataframe(
+            retention[["Game", "ts", "kind", "title", "baseline", "peak", "peak_lift_pct", "days_to_peak",
+                       "half_life_days", "days_to_baseline", "status"]].rename(columns={
+                "ts": f"When ({TZ_LABEL})", "kind": "Type", "title": "Event", "baseline": "Baseline",
+                "peak": "Peak", "peak_lift_pct": "Peak lift", "days_to_peak": "Days to peak",
+                "half_life_days": "Half-life (days)", "days_to_baseline": "Back to baseline (days)",
+                "status": "Status"}),
+            hide_index=True, width="stretch",
+            column_config={"Baseline": st.column_config.NumberColumn(format="localized"),
+                           "Peak": st.column_config.NumberColumn(format="localized"),
+                           "Peak lift": st.column_config.NumberColumn(format="%+.1f%%")})
+
 # --------------------------------------------------------------------------- compare
 
 with tab_compare:

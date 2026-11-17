@@ -224,6 +224,69 @@ def event_impact(players: pd.DataFrame, events: pd.DataFrame, window_days: int =
     return pd.DataFrame(out, columns=cols).sort_values("ts", ascending=False, ignore_index=True)
 
 
+def _bucket_peaks(series: pd.Series, lo: pd.Timestamp, days: int) -> pd.Series:
+    """Peak per 24h bucket starting at `lo` (index 0..days-1; missing buckets absent)."""
+    win = series[(series.index >= lo) & (series.index < lo + timedelta(days=days))]
+    if win.empty:
+        return pd.Series(dtype=float)
+    bucket = ((win.index - lo) // timedelta(hours=24)).astype(int)
+    return win.groupby(bucket).max().astype(float)
+
+
+def event_retention(players: pd.DataFrame, events: pd.DataFrame, baseline_days: int = 7,
+                    max_days: int = 30, tolerance: float = 0.10, min_coverage: float = 0.6) -> pd.DataFrame:
+    """Does a bump last? For each event: baseline = average daily peak in the
+    `baseline_days` before; then the 24h-bucket peaks after the event are followed
+    until they fall back to within `tolerance` of the baseline.
+
+    status: 'no bump' (peak lift under tolerance), 'back to baseline',
+    'still elevated' (not back yet, as of the latest data) or 'not enough data'.
+    """
+    cols = ["appid", "ts", "kind", "title", "baseline", "peak", "peak_lift_pct", "days_to_peak",
+            "half_life_days", "days_to_baseline", "status"]
+    if players.empty or events.empty:
+        return pd.DataFrame(columns=cols)
+    out = []
+    for appid, evs in events.groupby("appid"):
+        series = players[players["appid"] == appid].set_index("ts")["players"].sort_index()
+        if series.empty:
+            continue
+        last = series.index.max()
+        for _, ev in evs.iterrows():
+            t = ev["ts"]
+            before = _bucket_peaks(series, t - timedelta(days=baseline_days), baseline_days)
+            after = _bucket_peaks(series, t, max_days)
+            # Only full days count for "after"; the bucket still in progress would look like a drop.
+            full_days = int((min(last, t + timedelta(days=max_days)) - t) // timedelta(hours=24))
+            after = after[after.index < full_days]
+            row = {"appid": appid, "ts": t, "kind": ev["kind"], "title": ev.get("title"), "baseline": None,
+                   "peak": None, "peak_lift_pct": None, "days_to_peak": None, "half_life_days": None,
+                   "days_to_baseline": None, "status": "not enough data"}
+            if len(before) < baseline_days * min_coverage or after.empty or not before.mean():
+                out.append(row)
+                continue
+            base = float(before.mean())
+            first_week = after[after.index < 7]
+            peak_day = int(first_week.idxmax())
+            peak = float(first_week.max())
+            lift = peak / base - 1
+            row.update(baseline=base, peak=peak, peak_lift_pct=lift * 100, days_to_peak=peak_day)
+            if lift < tolerance:
+                row["status"] = "no bump"
+                out.append(row)
+                continue
+            rest = after[after.index > peak_day]
+            back = rest[rest <= base * (1 + tolerance)]
+            half = rest[rest - base <= (peak - base) / 2]
+            row["half_life_days"] = int(half.index[0] - peak_day) if not half.empty else None
+            if not back.empty:
+                row.update(days_to_baseline=int(back.index[0]), status="back to baseline")
+            else:
+                row.update(days_to_baseline=None, status="still elevated")
+            out.append(row)
+    return pd.DataFrame(out, columns=cols).sort_values("ts", ascending=False, ignore_index=True)
+
+
 def sale_effectiveness(players: pd.DataFrame, events: pd.DataFrame, window_days: int = 7,
                        market_players: pd.DataFrame | None = None, now: datetime | None = None,
                        min_coverage: float = 0.6) -> pd.DataFrame:

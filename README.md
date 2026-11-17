@@ -108,6 +108,9 @@ listed on the *Prices & sales* tab. The more games you track, the more reliable 
 event-impact change at the sale's start, vs. market when available) and reports *lift per 10% off*. A median by
 discount bracket shows where deeper discounts stop paying off.
 
+**How long bumps last** (same tab) follows each event's daily peaks for up to 30 days: peak lift in the first
+week, *half-life* (days until half the gain is gone) and days until players are back within 10% of the baseline.
+
 This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
 (a streamer, a trailer) won't show up in the market baseline.
 
