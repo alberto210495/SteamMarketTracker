@@ -445,3 +445,21 @@ def test_to_timezone_converts_naive_utc():
     out = analysis.to_timezone(df, ["ts"], "America/Chicago")
     assert out["ts"].tolist() == [pd.Timestamp("2026-01-15 12:00"), pd.Timestamp("2026-07-15 13:00")]  # CST / CDT
     assert analysis.to_timezone(df, ["ts"], "UTC") is df
+
+
+# --------------------------------------------------------------------------- sale effectiveness
+
+def test_sale_effectiveness_lift_per_discount():
+    sale_ts = pd.Timestamp("2026-03-10 17:00")
+    players = hourly(1, "2026-03-01", 20, lambda t: 1500 if t >= sale_ts else 1000)
+    events = pd.DataFrame([
+        {"appid": 1, "ts": sale_ts, "kind": "sale_start", "title": "50% off", "detail": '{"discount_pct": 50}'},
+        {"appid": 1, "ts": sale_ts + timedelta(days=7), "kind": "sale_end", "title": "end", "detail": "{}"},
+    ])
+    out = analysis.sale_effectiveness(players, events, window_days=7, now=datetime(2026, 3, 21))
+    row = out.iloc[0]
+    assert row["discount_pct"] == 50 and row["enough_data"]
+    assert row["lift_pct"] == pytest.approx(50)          # no market data -> raw change
+    assert row["lift_per_10pct"] == pytest.approx(10)
+    brackets = analysis.discount_brackets(out)
+    assert brackets.iloc[0]["bracket"] == "50–74%" and brackets.iloc[0]["sales"] == 1

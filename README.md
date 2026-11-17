@@ -104,6 +104,10 @@ market. It needs at least two other games with enough data around the event.
 least 3) are discounted at once, usually a Steam seasonal sale. They're shaded grey on the player charts and
 listed on the *Prices & sales* tab. The more games you track, the more reliable both of these become.
 
+**Sale effectiveness** (*Prices & sales* tab) plots each sale's discount against its player lift (the
+event-impact change at the sale's start, vs. market when available) and reports *lift per 10% off*. A median by
+discount bracket shows where deeper discounts stop paying off.
+
 This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
 (a streamer, a trailer) won't show up in the market baseline.
 

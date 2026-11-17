@@ -400,6 +400,50 @@ with tab_prices:
                 columns={"start": f"Start ({TZ_LABEL})", "end": f"End ({TZ_LABEL})",
                          "discount_pct": "Max discount %", "ongoing": "Ongoing"}), hide_index=True, width="stretch")
 
+        st.subheader("Sale effectiveness")
+        effect = analysis.sale_effectiveness(players, events, window_days=window, market_players=all_players,
+                                             now=end)
+        if effect.empty:
+            st.caption("Appears once a sale has player data around its start.")
+        else:
+            st.caption(f"Lift = change in average daily peak, the {window} days before a sale vs. its first "
+                       f"{window} days (or the whole sale if shorter), relative to the market when there's "
+                       "enough data. *Lift per 10% off* shows where deeper discounts stop paying off.")
+            ok = effect[effect["enough_data"] & effect["lift_pct"].notna()]
+            if not ok.empty:
+                fig = go.Figure()
+                for a in ids:
+                    d = ok[ok["appid"] == a]
+                    if d.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=d["discount_pct"], y=d["lift_pct"], mode="markers", name=NAME[a],
+                        marker=dict(color=COLOR[a], size=12, line=dict(color=C["surface"], width=2)),
+                        customdata=d["start"].dt.strftime("%b %d, %Y"),
+                        hovertemplate=NAME[a] + " · %{customdata}<br>-%{x}% → %{y:+.1f}% players<extra></extra>"))
+                fig.add_hline(y=0, line=dict(color=C["axis"], width=1))
+                style(fig, height=340, y_title="Player lift").update_layout(hovermode="closest")
+                fig.update_xaxes(title_text="Discount", ticksuffix="%", showspikes=False,
+                                 title_font=dict(color=C["muted"]))
+                fig.update_yaxes(ticksuffix="%", rangemode="normal")
+                show(fig, title="Discount vs. player lift")
+                brackets = analysis.discount_brackets(effect)
+                if len(brackets) > 1:
+                    st.dataframe(brackets.rename(columns={
+                        "bracket": "Discount", "sales": "Sales", "median_lift_pct": "Median lift",
+                        "median_lift_per_10pct": "Median lift per 10% off"}), hide_index=True, width="stretch",
+                        column_config={"Median lift": st.column_config.NumberColumn(format="%+.1f%%"),
+                                       "Median lift per 10% off": st.column_config.NumberColumn(format="%+.1f%%")})
+            tbl = effect.copy()
+            tbl.insert(0, "Game", tbl["appid"].map(NAME))
+            st.dataframe(tbl[["Game", "start", "discount_pct", "duration_days", "change_pct", "vs_market_pct",
+                              "lift_per_10pct", "enough_data"]].rename(columns={
+                "start": f"Start ({TZ_LABEL})", "discount_pct": "Discount %", "duration_days": "Days",
+                "change_pct": "Change", "vs_market_pct": "Vs market", "lift_per_10pct": "Lift per 10% off",
+                "enough_data": "Enough data"}), hide_index=True, width="stretch",
+                column_config={c: st.column_config.NumberColumn(format="%+.1f%%")
+                               for c in ("Change", "Vs market", "Lift per 10% off")})
+
         st.subheader("Market-wide sales")
         if market_sales.empty:
             st.caption("None detected yet. A period counts when at least half of the tracked paid games "

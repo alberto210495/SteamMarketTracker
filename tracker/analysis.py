@@ -224,6 +224,58 @@ def event_impact(players: pd.DataFrame, events: pd.DataFrame, window_days: int =
     return pd.DataFrame(out, columns=cols).sort_values("ts", ascending=False, ignore_index=True)
 
 
+def sale_effectiveness(players: pd.DataFrame, events: pd.DataFrame, window_days: int = 7,
+                       market_players: pd.DataFrame | None = None, now: datetime | None = None,
+                       min_coverage: float = 0.6) -> pd.DataFrame:
+    """How much each sale lifted players, per point of discount.
+
+    The lift is the event-impact change at the sale's start (average daily peak in
+    the N days before vs. the first N days of the sale, N capped at the sale's
+    length). `vs_market_pct` is used when available, so a Steam-wide sale doesn't
+    flatter every game. `lift_per_10pct` = lift / discount * 10, which shows where
+    deeper discounts stop paying off.
+    """
+    cols = ["appid", "start", "end", "discount_pct", "duration_days", "ongoing", "before", "after",
+            "change_pct", "vs_market_pct", "lift_pct", "lift_per_10pct", "enough_data"]
+    sales = sale_intervals(events, now=now)
+    sales = sales[sales["discount_pct"].fillna(0) > 0] if not sales.empty else sales
+    if sales.empty or players.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for s in sales.itertuples():
+        duration = (s.end - s.start).total_seconds() / 86400
+        days = max(1, min(window_days, int(duration)))
+        ev = pd.DataFrame([{"appid": s.appid, "ts": s.start, "kind": "sale_start", "title": ""}])
+        imp = event_impact(players[players["appid"] == s.appid], ev, window_days=days,
+                           min_coverage=min_coverage, market_players=market_players)
+        if imp.empty:
+            continue
+        r = imp.iloc[0]
+        lift = r["vs_market_pct"] if pd.notna(r["vs_market_pct"]) else r["change_pct"]
+        rows.append({
+            "appid": s.appid, "start": s.start, "end": s.end, "discount_pct": int(s.discount_pct),
+            "duration_days": round(duration, 1), "ongoing": bool(s.ongoing), "before": r["before"],
+            "after": r["after"], "change_pct": r["change_pct"], "vs_market_pct": r["vs_market_pct"],
+            "lift_pct": lift, "lift_per_10pct": lift / s.discount_pct * 10 if pd.notna(lift) else None,
+            "enough_data": bool(r["enough_data"]),
+        })
+    return pd.DataFrame(rows, columns=cols).sort_values("start", ascending=False, ignore_index=True)
+
+
+def discount_brackets(effect: pd.DataFrame) -> pd.DataFrame:
+    """Median lift by discount bracket, across all sales with enough data."""
+    cols = ["bracket", "sales", "median_lift_pct", "median_lift_per_10pct"]
+    ok = effect[effect["enough_data"] & effect["lift_pct"].notna()] if not effect.empty else effect
+    if ok.empty:
+        return pd.DataFrame(columns=cols)
+    bins = [0, 24, 49, 74, 100]
+    labels = ["1–24%", "25–49%", "50–74%", "75–100%"]
+    b = pd.cut(ok["discount_pct"], bins=bins, labels=labels)
+    out = ok.groupby(b, observed=True).agg(sales=("lift_pct", "size"), median_lift_pct=("lift_pct", "median"),
+                                           median_lift_per_10pct=("lift_per_10pct", "median")).reset_index()
+    return out.rename(columns={"discount_pct": "bracket"})[cols]
+
+
 def market_sale_periods(prices: pd.DataFrame, min_share: float = 0.5, min_games: int = 3,
                         max_gap: timedelta = timedelta(hours=3)) -> pd.DataFrame:
     """Periods when at least `min_share` of the tracked paid games (and at least
