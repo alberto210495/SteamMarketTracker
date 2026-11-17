@@ -493,3 +493,24 @@ def test_weekly_profile_and_summary():
     s = analysis.profile_summary(prof).iloc[0]
     assert s["peak_hour"] == 20 and s["peak_day"] in ("Sat", "Sun")
     assert s["weekend_pct"] == pytest.approx(100)
+
+
+def test_seasonal_sale_calendar():
+    sales = {s["name"]: s["start"] for s in analysis.steam_seasonal_sales(2025)}
+    assert sales["Spring Sale"].date() == datetime(2025, 3, 13).date()   # actual: Mar 13
+    assert sales["Summer Sale"].date() == datetime(2025, 6, 26).date()   # actual: Jun 26
+    assert sales["Winter Sale"].date() == datetime(2025, 12, 18).date()  # actual: Dec 18
+    nxt = analysis.next_seasonal_sale(datetime(2026, 11, 16))
+    assert nxt["name"] == "Autumn Sale" and nxt["start"] == datetime(2026, 11, 25, 17) and not nxt["ongoing"]
+
+
+def test_predict_next_sales_from_regular_gaps():
+    rows = []
+    for day in [1, 31, 61, 91]:   # every 30 days, a week long
+        t = pd.Timestamp("2026-01-01") + pd.Timedelta(days=day)
+        rows += [{"appid": 1, "ts": t, "kind": "sale_start", "detail": '{"discount_pct": 50}'},
+                 {"appid": 1, "ts": t + pd.Timedelta(days=7), "kind": "sale_end", "detail": "{}"}]
+    out = analysis.predict_next_sales(pd.DataFrame(rows), now=datetime(2026, 4, 20)).iloc[0]
+    assert out["sales_seen"] == 4 and out["median_gap_days"] == pytest.approx(30)
+    assert out["predicted_next"] == pd.Timestamp("2026-05-02") and out["confidence"] == "high"
+    assert not out["on_sale_now"]

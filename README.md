@@ -102,7 +102,9 @@ market. It needs at least two other games with enough data around the event.
 
 **Market-wide sales** are detected from the price data: periods when at least half of the tracked paid games (and at
 least 3) are discounted at once, usually a Steam seasonal sale. They're shaded grey on the player charts and
-listed on the *Prices & sales* tab. The more games you track, the more reliable both of these become.
+listed on the *Prices & sales* tab. The same tab estimates each game's **next sale** (last sale + the typical gap
+between its sales, with a confidence based on how regular the gaps are) and the next Steam seasonal sale, estimated
+from Valve's usual schedule. The more games you track, the more reliable both of these become.
 
 **Sale effectiveness** (*Prices & sales* tab) plots each sale's discount against its player lift (the
 event-impact change at the sale's start, vs. market when available) and reports *lift per 10% off*. A median by

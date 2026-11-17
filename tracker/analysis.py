@@ -235,7 +235,7 @@ def weekly_profile(players: pd.DataFrame) -> pd.DataFrame:
     if players.empty:
         return pd.DataFrame(columns=cols)
     df = players.dropna(subset=["players"]).copy()
-    df["weekday"] = df["ts"].dt.dayofweek
+    df["weekday"] = df["ts"].dt.day_of_week
     df["hour"] = df["ts"].dt.hour
     out = (df.groupby(["appid", "weekday", "hour"])["players"].agg(players="mean", samples="size")
            .reset_index())
@@ -374,6 +374,72 @@ def discount_brackets(effect: pd.DataFrame) -> pd.DataFrame:
     out = ok.groupby(b, observed=True).agg(sales=("lift_pct", "size"), median_lift_pct=("lift_pct", "median"),
                                            median_lift_per_10pct=("lift_per_10pct", "median")).reset_index()
     return out.rename(columns={"discount_pct": "bracket"})[cols]
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> datetime:
+    """n-th `weekday` (Mon=0) of the month; n=-1 for the last one."""
+    if n > 0:
+        d = datetime(year, month, 1)
+        d += timedelta(days=(weekday - d.weekday()) % 7)
+        return d + timedelta(weeks=n - 1)
+    d = datetime(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() - weekday) % 7)
+
+
+def steam_seasonal_sales(year: int) -> list[dict]:
+    """Approximate dates of Steam's four big seasonal sales, from their usual pattern
+    (Valve announces the exact dates a few weeks ahead). Start 17:00 UTC (10am Pacific)."""
+    thanksgiving = _nth_weekday(year, 11, 3, 4)
+    raw = [
+        ("Spring Sale", _nth_weekday(year, 3, 3, 2), 7),             # 2nd Thursday of March
+        ("Summer Sale", _nth_weekday(year, 6, 3, -1), 14),           # last Thursday of June
+        ("Autumn Sale", thanksgiving - timedelta(days=1), 7),        # day before Thanksgiving
+        ("Winter Sale", _nth_weekday(year, 12, 3, 3), 14),           # 3rd Thursday of December
+    ]
+    return [{"name": n, "start": d.replace(hour=17), "end": d.replace(hour=17) + timedelta(days=days)}
+            for n, d, days in raw]
+
+
+def next_seasonal_sale(now: datetime) -> dict:
+    """The seasonal sale running now, or the next one (approximate dates)."""
+    for year in (now.year - 1, now.year, now.year + 1):
+        for sale in steam_seasonal_sales(year):
+            if sale["end"] > now:
+                return {**sale, "ongoing": sale["start"] <= now}
+    raise AssertionError("unreachable")
+
+
+def predict_next_sales(events: pd.DataFrame, market_sales: pd.DataFrame | None = None,
+                       now: datetime | None = None) -> pd.DataFrame:
+    """Per game: when the next sale is likely, from the gaps between its past sales.
+
+    `predicted_next` = last sale start + median gap (needs 2+ sales). `confidence` is
+    high when the gaps are regular (spread under 25% of the median), low with few sales
+    or irregular gaps. `seasonal_joined` = how many market-wide sales the game joined.
+    """
+    cols = ["appid", "sales_seen", "on_sale_now", "last_start", "median_gap_days", "predicted_next",
+            "confidence", "seasonal_joined", "seasonal_total"]
+    now = pd.Timestamp(now or db.utcnow())
+    sales = sale_intervals(events, now=now.to_pydatetime())
+    if sales.empty:
+        return pd.DataFrame(columns=cols)
+    ms = market_sales if market_sales is not None else pd.DataFrame(columns=["start", "end"])
+    rows = []
+    for appid, g in sales.groupby("appid"):
+        starts = g["start"].sort_values().reset_index(drop=True)
+        gaps = starts.diff().dropna().dt.total_seconds() / 86400
+        gaps = gaps[gaps >= 3]   # a discount tweak a day later isn't a new sale
+        median = float(gaps.median()) if not gaps.empty else None
+        predicted, confidence = None, None
+        if median:
+            predicted = starts.iloc[-1] + pd.Timedelta(days=median)
+            spread = float(gaps.std()) / median if len(gaps) > 1 else 1.0
+            confidence = "high" if len(gaps) >= 3 and spread < 0.25 else ("medium" if spread < 0.5 else "low")
+        joined = sum(bool(((g["start"] <= m.end) & (g["end"] >= m.start)).any()) for m in ms.itertuples())
+        rows.append({"appid": appid, "sales_seen": len(starts), "on_sale_now": bool(g["ongoing"].any()),
+                     "last_start": starts.iloc[-1], "median_gap_days": median, "predicted_next": predicted,
+                     "confidence": confidence, "seasonal_joined": joined, "seasonal_total": len(ms)})
+    return pd.DataFrame(rows, columns=cols)
 
 
 def market_sale_periods(prices: pd.DataFrame, min_share: float = 0.5, min_games: int = 3,

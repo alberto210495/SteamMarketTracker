@@ -401,6 +401,34 @@ with tab_prices:
                 columns={"start": f"Start ({TZ_LABEL})", "end": f"End ({TZ_LABEL})",
                          "discount_pct": "Max discount %", "ongoing": "Ongoing"}), hide_index=True, width="stretch")
 
+        st.subheader("Next sale")
+        seasonal = analysis.next_seasonal_sale(db.utcnow())
+        when = "running now" if seasonal["ongoing"] else f"likely around **{seasonal['start']:%b %d, %Y}**"
+        st.caption(f"Next Steam seasonal sale: **{seasonal['name']}**, {when} (estimated from Valve's usual "
+                   "schedule; exact dates are announced a few weeks ahead).")
+        pred = analysis.predict_next_sales(q_events(DB_URL, ids), analysis.market_sale_periods(
+            q_prices(DB_URL, tuple(NAME))), now=db.utcnow())
+        if pred.empty:
+            st.caption("Per-game predictions appear once a game has had two sales.")
+        else:
+            pred = analysis.to_timezone(pred, ["last_start", "predicted_next"], TZ)
+            pred.insert(0, "Game", pred["appid"].map(NAME))
+            today = now_local.normalize()
+            pred["Next sale (est.)"] = [
+                "on sale now" if r.on_sale_now else
+                ("—" if pd.isna(r.predicted_next) else
+                 f"{r.predicted_next:%b %d}" + (" (overdue)" if r.predicted_next < today else ""))
+                for r in pred.itertuples()]
+            pred["Joined market sales"] = [f"{j} of {t}" if t else "—"
+                                           for j, t in zip(pred["seasonal_joined"], pred["seasonal_total"])]
+            st.dataframe(pred[["Game", "Next sale (est.)", "confidence", "sales_seen", "median_gap_days",
+                               "last_start", "Joined market sales"]].rename(columns={
+                "confidence": "Confidence", "sales_seen": "Sales seen", "median_gap_days": "Typical gap (days)",
+                "last_start": f"Last sale ({TZ_LABEL})"}), hide_index=True, width="stretch",
+                column_config={"Typical gap (days)": st.column_config.NumberColumn(format="%.0f")})
+            st.caption("Estimate = last sale + the typical gap between this game's sales. Games that join "
+                       "market-wide sales will likely be discounted in the next seasonal sale too.")
+
         st.subheader("Sale effectiveness")
         effect = analysis.sale_effectiveness(players, events, window_days=window, market_players=all_players,
                                              now=end)
