@@ -57,6 +57,8 @@ class AlertsConfig:
     price_targets: bool = True      # a game drops to or below its `target_price` in [[games]]
     all_time_lows: bool = True      # a discounted game hits its lowest price since tracking began
     atl_min_history_days: int = 30  # ...once there's at least this much price history
+    weekly_digest: bool = True      # movers, active sales and patches of the past week
+    weekly_digest_weekday: int = 0  # 0 = Monday; sent on the first run after daily_summary_hour_utc
 
 
 def twitch_credentials() -> tuple[str, str] | None:

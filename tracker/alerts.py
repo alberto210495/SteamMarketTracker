@@ -5,6 +5,7 @@
 - daily summary: once per UTC day, on the first run at or after the configured hour
 - review bombs: the latest day's new negative reviews far above the usual level
 - price watch: a game at or below its target price, or at its all-time low (once per drop)
+- weekly digest: biggest movers, active sales and patches, once a week
 
 No pandas here: this runs in the scheduled job with requirements-worker.txt only.
 A failed Discord send never advances the bookkeeping, so nothing is lost.
@@ -38,7 +39,7 @@ PATCH_KINDS = ("patch",)
 COLORS = {  # Discord embed sidebar colours
     "sale_start": 0x1BAF7A, "sale_change": 0x1BAF7A, "sale_end": 0x898781, "price_change": 0xEDA100,
     "patch": 0x2A78D6, "spike": 0xEB6834, "summary": 0x6250D6, "test": 0x2A78D6, "bomb": 0xE34948,
-    "target": 0x1BAF7A, "atl": 0x008300,
+    "target": 0x1BAF7A, "atl": 0x008300, "digest": 0x6250D6,
 }
 LABELS = {"sale_start": "On sale", "sale_end": "Sale ended", "sale_change": "Discount changed",
           "price_change": "Price change", "patch": "New patch"}
@@ -85,6 +86,7 @@ class AlertStats:
     bombs: int = 0
     price_watch: int = 0
     summary: bool = False
+    digest: bool = False
     failures: list[str] = field(default_factory=list)
 
 
@@ -337,6 +339,68 @@ def summary_embed(engine: Engine, appids: list[int], now: datetime, country: str
     }
 
 
+# --------------------------------------------------------------------------- weekly digest
+
+def _avg_daily_peak(rows: list[Any], lo: datetime, hi: datetime) -> float | None:
+    peaks: dict = {}
+    for r in rows:
+        if lo < r.ts <= hi:   # (lo, hi], so a boundary sample counts in one week only
+            day = r.ts.date()
+            peaks[day] = max(peaks.get(day, 0), r.players)
+    return statistics.mean(peaks.values()) if len(peaks) >= 3 else None
+
+
+def digest_embed(engine: Engine, appids: list[int], now: datetime, country: str | None = None,
+                 top: int = 3) -> dict | None:
+    """Past 7 days vs the 7 before: biggest movers (average daily peak), games on sale
+    right now and patches shipped this week."""
+    t, p, e = db.player_snapshots, db.price_snapshots, db.events
+    names = _names(engine)
+    movers, sales, patches = [], [], []
+    week_ago, two_weeks_ago = now - timedelta(days=7), now - timedelta(days=14)
+    for appid in appids:
+        with engine.connect() as conn:
+            rows = conn.execute(select(t.c.ts, t.c.players).where(t.c.appid == appid, t.c.ts >= two_weeks_ago)).all()
+            pq = select(p).where(p.c.appid == appid)
+            if country:
+                pq = pq.where(p.c.country == country)
+            price = conn.execute(pq.order_by(p.c.ts.desc()).limit(1)).mappings().first()
+            pts = conn.execute(select(e.c.title).where(e.c.appid == appid, e.c.kind == "patch",
+                                                       e.c.ts >= week_ago).order_by(e.c.ts)).scalars().all()
+        name = names.get(appid, appid)
+        cur, prev = _avg_daily_peak(rows, week_ago, now), _avg_daily_peak(rows, two_weeks_ago, week_ago)
+        if cur is not None and prev:
+            movers.append(((cur - prev) / prev * 100, name, cur))
+        if price and price["discount_pct"] and not price["is_free"] and price["ts"] >= now - timedelta(hours=3):
+            sales.append(f"**{name}** -{price['discount_pct']}% · {price['final_cents'] / 100:.2f} "
+                         f"{price['currency'] or ''}".rstrip())
+        if pts:
+            patches.append(f"**{name}**: {len(pts)} patch{'es' if len(pts) > 1 else ''}"
+                           f" (latest: {(pts[-1] or '')[:80]})")
+    if not (movers or sales or patches):
+        return None
+    movers.sort(key=lambda m: -m[0])
+    lines = []
+    up = [m for m in movers if m[0] >= 1][:top]
+    down = [m for m in reversed(movers) if m[0] <= -1][:top]
+    if up or down:
+        lines.append("__Biggest movers__ (avg daily peak vs. the week before)")
+        lines += [f"▲ **{n}** {c:+.0f}% · {_fmt_int(v)}" for c, n, v in up]
+        lines += [f"▼ **{n}** {c:+.0f}% · {_fmt_int(v)}" for c, n, v in down]
+    elif movers:
+        lines.append("__Players__: all tracked games within ±1% of last week.")
+    if sales:
+        lines += ["", "__On sale now__"] + sales
+    if patches:
+        lines += ["", "__Patches this week__"] + patches
+    return {
+        "title": f"Weekly digest · {week_ago:%b %d} – {now:%b %d}",
+        "description": "\n".join(lines).strip()[:4000],
+        "color": COLORS["digest"],
+        "timestamp": now.isoformat() + "Z",
+    }
+
+
 # --------------------------------------------------------------------------- entry point
 
 def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, now: datetime | None = None,
@@ -409,8 +473,23 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
             log.exception("Daily summary failed")
             stats.failures.append("summary")
 
-    log.info("Alerts: events=%d spikes=%d bombs=%d price_watch=%d summary=%s%s", stats.events, stats.spikes,
-             stats.bombs, stats.price_watch, stats.summary,
+    if (cfg.weekly_digest and now.weekday() == cfg.weekly_digest_weekday
+            and now.hour >= cfg.daily_summary_hour_utc):
+        key, week = "alerts.weekly_digest", "%d-W%02d" % now.isocalendar()[:2]
+        try:
+            if db.get_state(engine, key) != week:
+                embed = digest_embed(engine, appids, now, country)
+                if embed and send([embed]):
+                    db.set_state(engine, key, week)
+                    stats.digest = True
+                elif embed:
+                    stats.failures.append("digest")
+        except Exception:
+            log.exception("Weekly digest failed")
+            stats.failures.append("digest")
+
+    log.info("Alerts: events=%d spikes=%d bombs=%d price_watch=%d summary=%s digest=%s%s", stats.events,
+             stats.spikes, stats.bombs, stats.price_watch, stats.summary, stats.digest,
              f" failures={stats.failures}" if stats.failures else "")
     return stats
 
@@ -418,7 +497,8 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
 def send_test(send: Sender) -> bool:
     return send([{
         "title": "Steam Tracker is connected",
-        "description": "Alerts for sales, patches, price targets, player spikes, review bombs and a daily summary will appear "
+        "description": "Alerts for sales, patches, price targets, player spikes, review bombs, a daily summary and a weekly "
+                       "digest will appear "
                        "in this channel.",
         "color": COLORS["test"],
         "timestamp": db.utcnow().isoformat() + "Z",

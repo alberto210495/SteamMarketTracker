@@ -783,3 +783,33 @@ def test_price_watch_table_and_targets_config(tmp_path):
     p = tmp_path / "g.toml"
     p.write_text('[[games]]\nappid = 1\ntarget_price = 9.99\n[[games]]\nappid = 2\n')
     assert config.load_games(p).targets == {1: 9.99}
+
+
+
+# --------------------------------------------------------------------------- weekly digest
+
+def test_weekly_digest_once_per_week(engine):
+    _seed_game(engine, 1, "Riser")
+    _seed_game(engine, 2, "Faller")
+    now = datetime(2026, 3, 16, 15)      # a Monday
+    rows = []
+    for h in range(14 * 24):
+        ts = now - timedelta(hours=h)
+        recent = h < 7 * 24
+        rows += [{"appid": 1, "ts": ts, "players": 1500 if recent else 1000},
+                 {"appid": 2, "ts": ts, "players": 500 if recent else 1000}]
+    db.insert_ignore(engine, db.player_snapshots, rows)
+    _prices(engine, 1, now - timedelta(hours=1), [1000])
+    _event(engine, 2, now - timedelta(days=2), "patch", "Hotfix 1.0.1", "p1")
+    cfg = AlertsConfig(sales=False, patches=False, spikes=False, daily_summary=False, review_bombs=False,
+                       price_targets=False, all_time_lows=False)
+    send = FakeSender()
+    alerts_mod.process(engine, cfg, [1, 2], send, now=now - timedelta(days=1), country="us")   # Sunday: nothing
+    assert send.calls == []
+    alerts_mod.process(engine, cfg, [1, 2], send, now=now, country="us")
+    alerts_mod.process(engine, cfg, [1, 2], send, now=now + timedelta(hours=2), country="us")  # same week
+    assert len(send.calls) == 1
+    text = send.calls[0][0]["description"]
+    assert "▲ **Riser** +50%" in text and "▼ **Faller** -50%" in text
+    assert "**Riser** -50%" in text            # on sale now
+    assert "Hotfix 1.0.1" in text

@@ -85,6 +85,7 @@ collection run posts:
 | Price target | a game's price drops to or below its `target_price` (set per game in games.toml); once per drop |
 | All-time low | a discounted game reaches its lowest price since tracking began (after 30 days of history); once per drop |
 | Daily summary | once a day, first run after 14:00 UTC: each game's 24h peak, change vs. the day before, current price |
+| Weekly digest | Mondays (configurable), first run after the daily summary hour: biggest movers (average daily peak vs. the week before), games on sale and patches of the past week |
 
 Toggle each one and tune thresholds under `[alerts]` in [games.toml](games.toml). The first run with alerts
 enabled sends nothing for events already in the database. If Discord is unreachable, the alerts are retried on the
