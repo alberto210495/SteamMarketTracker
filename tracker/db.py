@@ -106,6 +106,19 @@ review_snapshots = Table(
     Column("total_reviews", BigInteger, nullable=False),
 )
 
+# Daily Steam review split (store.steampowered.com/appreviews query_summary).
+# New positive/negative reviews per day = difference between consecutive days.
+review_score_snapshots = Table(
+    "review_score_snapshots",
+    metadata,
+    Column("appid", Integer, primary_key=True),
+    Column("date", Date, primary_key=True),
+    Column("total_positive", BigInteger, nullable=False),
+    Column("total_negative", BigInteger, nullable=False),
+    Column("review_score", Integer),
+    Column("review_score_desc", String(64)),
+)
+
 # Games added or removed from the dashboard. Combined with games.toml:
 # tracked = games.toml + active rows here - rows here with active = false.
 # The dashboard's read-only role is granted INSERT/UPDATE on this table only.
@@ -239,7 +252,7 @@ def copy_database(src: Engine, dst: Engine, chunk: int = 2000) -> dict[str, int]
     stays consistent; events dedupe on (appid, kind, source_id)."""
     counts: dict[str, int] = {}
     for table in (games, player_snapshots, price_snapshots, owner_snapshots, review_snapshots,
-                  tracked_games, events):
+                  review_score_snapshots, tracked_games, events):
         cols = [c for c in table.columns if not (table is events and c.name == "id")]
         n = 0
         with src.connect() as conn:
@@ -254,3 +267,9 @@ def has_owner_snapshot(engine: Engine, appid: int, day) -> bool:
     t = owner_snapshots
     with engine.connect() as conn:
         return conn.execute(select(t.c.appid).where(t.c.appid == appid, t.c.date == day)).first() is not None
+
+
+def has_snapshot(engine: Engine, table: Table, appid: int, day) -> bool:
+    """Daily tables keyed by (appid, date)."""
+    with engine.connect() as conn:
+        return conn.execute(select(table.c.appid).where(table.c.appid == appid, table.c.date == day)).first() is not None

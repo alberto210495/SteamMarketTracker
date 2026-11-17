@@ -105,6 +105,10 @@ class FakeClient:
     def news(self, appid):
         return [{"gid": "123", "title": "Patch 1.1", "url": "https://x", "date": 1_700_000_000, "tags": []}]
 
+    def review_summary(self, appid):
+        return {"total_positive": 900 + appid, "total_negative": 100, "review_score": 8,
+                "review_score_desc": "Very Positive"}
+
     def steamspy(self, appid):
         return {"appid": appid, "owners": "1,000 .. 2,000", "positive": 10, "negative": 2, "ccu": 5,
                 "average_forever": 60, "median_forever": 30}
@@ -530,3 +534,66 @@ def test_health_scores_components():
     # only quality available -> health = quality
     h2 = analysis.health_scores(players.iloc[:0], reviews.iloc[:0], owners).iloc[0]
     assert h2["health"] == pytest.approx(80) and h2["components"] == 1
+
+
+
+# --------------------------------------------------------------------------- review sentiment
+
+def test_parse_review_summary():
+    from tracker.steam import parse_review_summary
+    data = {"success": 1, "query_summary": {"num_reviews": 1, "review_score": 9, "review_score_desc":
+            "Overwhelmingly Positive", "total_positive": 950, "total_negative": 50, "total_reviews": 1000}}
+    assert parse_review_summary(data) == {"total_positive": 950, "total_negative": 50, "review_score": 9,
+                                          "review_score_desc": "Overwhelmingly Positive"}
+    assert parse_review_summary({"success": 2}) is None
+    assert parse_review_summary({"success": 1, "query_summary": {}}) is None
+
+
+def test_collect_sentiment_once_per_day(engine, monkeypatch):
+    t0 = datetime(2026, 1, 1, 10)
+    monkeypatch.setattr(db, "utcnow", lambda: t0)
+    games = config.GamesConfig(country="us", appids=[1, 2])
+    assert collect.run(engine=engine, client=FakeClient(), games=games).sentiment == 2
+    assert collect.run(engine=engine, client=FakeClient(), games=games).sentiment == 0
+    s = analysis.load_sentiment(engine, [1])
+    assert s.iloc[0]["positive_pct"] == pytest.approx(901 / 1001 * 100)
+
+
+def _sentiment_rows(appid, start, negatives, positive=200):
+    rows, pos, neg = [], 10_000, 1_000
+    for i, n in enumerate(negatives):
+        pos, neg = pos + positive, neg + n
+        rows.append({"appid": appid, "date": (start + timedelta(days=i)).date(), "total_positive": pos,
+                     "total_negative": neg, "review_score": 8, "review_score_desc": "Very Positive"})
+    return rows
+
+
+def test_review_bomb_detection_and_alert(engine):
+    _seed_game(engine)
+    start = datetime(2026, 3, 1)
+    db.insert_ignore(engine, db.review_score_snapshots, _sentiment_rows(1, start, [20] * 10 + [400]))
+    _event(engine, 1, start + timedelta(days=9, hours=18), "patch", "Patch 2.0", "p")
+    sent = analysis.load_sentiment(engine, [1])
+    bombs = analysis.review_bombs(sent, analysis.load_events(engine, [1]))
+    assert len(bombs) == 1 and bombs.iloc[0]["new_negative"] == 400
+    assert bombs.iloc[0]["related_event"] == "patch: Patch 2.0"
+    weekly = analysis.weekly_sentiment(sent)
+    assert weekly["reviews"].sum() == pytest.approx(9 * 220 + 600)   # first day has no previous day to diff
+
+    cfg = AlertsConfig(sales=False, patches=False, spikes=False, daily_summary=False)
+    now = start + timedelta(days=10, hours=12)
+    send = FakeSender()
+    alerts_mod.process(engine, cfg, [1], send, now=now)
+    assert send.titles == ["Review bomb: Game 1"]
+    alerts_mod.process(engine, cfg, [1], send, now=now + timedelta(hours=1))   # once per day
+    assert len(send.calls) == 1
+
+
+@pytest.mark.parametrize("neg,pos,hist,expected", [
+    (400, 200, [20] * 10, True),
+    (400, 500, [20] * 10, False),    # more positive than negative that day
+    (25, 0, [1] * 10, False),        # under the minimum
+    (100, 10, [50] * 10, False),     # only 2x the usual
+])
+def test_is_review_bomb(neg, pos, hist, expected):
+    assert alerts_mod.is_review_bomb(neg, pos, hist, 30) is expected

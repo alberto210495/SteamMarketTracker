@@ -117,6 +117,22 @@ def parse_review_total(details: dict[str, Any] | None) -> int | None:
         return None
 
 
+def parse_review_summary(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """appreviews?json=1 -> {"success": 1, "query_summary": {"total_positive": .., "total_negative": ..,
+    "review_score": 9, "review_score_desc": "Overwhelmingly Positive", ...}}."""
+    if not data or not data.get("success"):
+        return None
+    qs = data.get("query_summary") or {}
+    try:
+        pos, neg = int(qs["total_positive"]), int(qs["total_negative"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    score = qs.get("review_score")
+    return {"total_positive": pos, "total_negative": neg,
+            "review_score": int(score) if isinstance(score, (int, float)) else None,
+            "review_score_desc": (qs.get("review_score_desc") or None) and str(qs["review_score_desc"])[:64]}
+
+
 _PATCH_RE = re.compile(
     r"\b(patch|hotfix|hot-fix|update|changelog|release notes|v\d+(\.\d+)+|version \d)",
     re.IGNORECASE,
@@ -188,6 +204,14 @@ class SteamClient:
         if not entry.get("success"):
             return None
         return entry.get("data")
+
+    def review_summary(self, appid: int) -> dict[str, Any] | None:
+        """All-language, all-purchase review totals. One review is requested because the
+        summary only comes with the first page."""
+        data = self.store.get_json(f"https://store.steampowered.com/appreviews/{appid}",
+                                   {"json": 1, "language": "all", "purchase_type": "all", "filter": "recent",
+                                    "num_per_page": 1})
+        return parse_review_summary(data)
 
     def news(self, appid: int, count: int = 20) -> list[dict[str, Any]]:
         data = self.web.get_json(

@@ -54,6 +54,7 @@ Removing a game stops collection and hides it, but keeps its history. Changes ap
 | Patches & announcements | `ISteamNews/GetNewsForApp` (official announcements feed) | every run | `patch` if tagged `patchnotes` or the title looks like patch notes |
 | Owners, positive/negative reviews, playtime | SteamSpy `appdetails` | once per UTC day | Owners is a coarse **range** estimate |
 | Steam review total | storefront `appdetails` (`recommendations.total`) | once per UTC day | New reviews per day = difference between days |
+| Positive / negative reviews | `store.steampowered.com/appreviews` (`query_summary`) | once per UTC day | Steam's own all-language totals; daily differences give the weekly sentiment |
 | Name, developer, etc. | storefront `appdetails` | weekly | |
 
 No API key is required. If you set `STEAM_API_KEY` it is sent with Web API calls.
@@ -70,6 +71,7 @@ collection run posts:
 | Sale | a tracked game goes on sale, the sale ends, the discount changes, or the base price changes |
 | Patch | new patch notes appear on Steam |
 | Player spike | players are ≥1.5× (and ≥200 above) the median for that hour of day over the last 14 days; at most one per game per 24h. Needs ~5 days of history to start. |
+| Review bomb | a day's new negative reviews are ≥30, the majority of that day's reviews, and ≥3× the usual daily negatives (14-day median) |
 | Daily summary | once a day, first run after 14:00 UTC: each game's 24h peak, change vs. the day before, current price |
 
 Toggle each one and tune thresholds under `[alerts]` in [games.toml](games.toml). The first run with alerts
@@ -115,6 +117,10 @@ week, *half-life* (days until half the gain is gone) and days until players are 
 
 The **Patterns** tab shows each game's weekly rhythm: a weekday × hour heatmap of average players (in your time
 zone), the busiest and quietest hour, and how much busier weekends are.
+
+**Review sentiment** (*Owners & reviews*) charts the % positive of the reviews written each week, so a bad patch
+shows up long before it moves the all-time score. Review bombs are marked and listed with any patch or announcement
+in the 3 days before.
 
 **Health score** (0–100, first column of the overview table; breakdown on *Owners & reviews*): 40% player momentum
 (average daily peak, last 7 days vs. the 21 before), 20% review velocity (new reviews per day, same windows) and 40%

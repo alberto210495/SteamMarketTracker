@@ -3,6 +3,7 @@
 - sales / patches: events created since the last alert (cursor kept in app_state)
 - spikes: latest players vs. the median for the same hour of day over 14 days
 - daily summary: once per UTC day, on the first run at or after the configured hour
+- review bombs: the latest day's new negative reviews far above the usual level
 
 No pandas here: this runs in the scheduled job with requirements-worker.txt only.
 A failed Discord send never advances the bookkeeping, so nothing is lost.
@@ -35,7 +36,7 @@ PATCH_KINDS = ("patch",)
 
 COLORS = {  # Discord embed sidebar colours
     "sale_start": 0x1BAF7A, "sale_change": 0x1BAF7A, "sale_end": 0x898781, "price_change": 0xEDA100,
-    "patch": 0x2A78D6, "spike": 0xEB6834, "summary": 0x6250D6, "test": 0x2A78D6,
+    "patch": 0x2A78D6, "spike": 0xEB6834, "summary": 0x6250D6, "test": 0x2A78D6, "bomb": 0xE34948,
 }
 LABELS = {"sale_start": "On sale", "sale_end": "Sale ended", "sale_change": "Discount changed",
           "price_change": "Price change", "patch": "New patch"}
@@ -79,6 +80,7 @@ def discord_sender(webhook_url: str, username: str = "Steam Tracker") -> Sender:
 class AlertStats:
     events: int = 0
     spikes: int = 0
+    bombs: int = 0
     summary: bool = False
     failures: list[str] = field(default_factory=list)
 
@@ -175,6 +177,64 @@ def spike_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], now: date
     return embeds, keys
 
 
+# --------------------------------------------------------------------------- review bombs
+
+BOMB_LOOKBACK_DAYS = 14
+BOMB_RATIO = 3.0
+
+
+def is_review_bomb(new_negative: float, new_positive: float, history_negative: list[float],
+                   min_negative: int = 30) -> bool:
+    """A day counts as a review bomb when negative reviews are at least `min_negative`,
+    at least 3x the median of the previous days, and the majority of that day's reviews."""
+    if new_negative < min_negative or new_negative <= new_positive:
+        return False
+    usual = statistics.median(history_negative) if history_negative else 0
+    return new_negative >= BOMB_RATIO * max(usual, 1)
+
+
+def daily_review_split(rows: list[Any]) -> list[tuple[Any, float, float]]:
+    """[(date, total_positive, total_negative)] sorted -> [(date, new_pos/day, new_neg/day)]."""
+    out = []
+    for prev, cur in zip(rows, rows[1:]):
+        days = max((cur[0] - prev[0]).days, 1)
+        out.append((cur[0], max(cur[1] - prev[1], 0) / days, max(cur[2] - prev[2], 0) / days))
+    return out
+
+
+def bomb_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], now: datetime) -> tuple[list[dict], list[tuple]]:
+    t = db.review_score_snapshots
+    names = _names(engine)
+    embeds, marks = [], []
+    for appid in appids:
+        with engine.connect() as conn:
+            rows = conn.execute(select(t.c.date, t.c.total_positive, t.c.total_negative)
+                                .where(t.c.appid == appid).order_by(t.c.date.desc())
+                                .limit(BOMB_LOOKBACK_DAYS + 2)).all()
+        split = daily_review_split(sorted((r.date, r.total_positive, r.total_negative) for r in rows))
+        if len(split) < 4:
+            continue
+        day, pos, neg = split[-1]
+        if (now.date() - day).days > 1:
+            continue
+        if not is_review_bomb(neg, pos, [n for _, _, n in split[:-1]], cfg.review_bomb_min_negative):
+            continue
+        key = f"alerts.bomb.{appid}"
+        if db.get_state(engine, key) == day.isoformat():
+            continue
+        share = neg / (neg + pos) * 100 if neg + pos else 100
+        embeds.append({
+            "title": f"Review bomb: {names.get(appid, appid)}",
+            "description": (f"**{_fmt_int(neg)}** negative reviews on {day:%b %d} ({share:.0f}% of the day's reviews), "
+                            f"vs. a usual {_fmt_int(statistics.median([n for _, _, n in split[:-1]]))} per day."),
+            "url": f"https://store.steampowered.com/app/{appid}/#app_reviews_hash",
+            "color": COLORS["bomb"],
+            "timestamp": now.isoformat() + "Z",
+        })
+        marks.append((key, day.isoformat()))
+    return embeds, marks
+
+
 # --------------------------------------------------------------------------- daily summary
 
 def summary_embed(engine: Engine, appids: list[int], now: datetime) -> dict | None:
@@ -242,6 +302,19 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
             log.exception("Spike alerts failed")
             stats.failures.append("spikes")
 
+    if cfg.review_bombs:
+        try:
+            embeds, marks = bomb_embeds(engine, cfg, appids, now)
+            if embeds and send(embeds):
+                for k, v in marks:
+                    db.set_state(engine, k, v)
+                stats.bombs = len(embeds)
+            elif embeds:
+                stats.failures.append("bombs")
+        except Exception:
+            log.exception("Review bomb alerts failed")
+            stats.failures.append("bombs")
+
     if cfg.daily_summary and now.hour >= cfg.daily_summary_hour_utc:
         key, today = "alerts.daily_summary", now.date().isoformat()
         try:
@@ -256,7 +329,8 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
             log.exception("Daily summary failed")
             stats.failures.append("summary")
 
-    log.info("Alerts: events=%d spikes=%d summary=%s%s", stats.events, stats.spikes, stats.summary,
+    log.info("Alerts: events=%d spikes=%d bombs=%d summary=%s%s", stats.events, stats.spikes, stats.bombs,
+             stats.summary,
              f" failures={stats.failures}" if stats.failures else "")
     return stats
 
@@ -264,7 +338,8 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
 def send_test(send: Sender) -> bool:
     return send([{
         "title": "Steam Tracker is connected",
-        "description": "Alerts for sales, patches, player spikes and a daily summary will appear in this channel.",
+        "description": "Alerts for sales, patches, player spikes, review bombs and a daily summary will appear "
+                       "in this channel.",
         "color": COLORS["test"],
         "timestamp": db.utcnow().isoformat() + "Z",
     }])

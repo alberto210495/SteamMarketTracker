@@ -168,6 +168,11 @@ def q_reviews(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
     return analysis.load_reviews(_engine_for(url), list(appids))
 
 
+@st.cache_data(ttl=300)
+def q_sentiment(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_sentiment(_engine_for(url), list(appids))
+
+
 @st.cache_data(ttl=60)
 def q_tracked(url: str) -> list[int] | None:
     """games.toml + dashboard additions - removals; None if the table doesn't exist yet."""
@@ -252,6 +257,7 @@ prices = analysis.to_timezone(q_prices(DB_URL, ids), ["ts"], TZ)
 events = analysis.to_timezone(q_events(DB_URL, ids), ["ts"], TZ)
 owners = q_owners(DB_URL, ids)
 reviews = q_reviews(DB_URL, ids)
+sentiment = q_sentiment(DB_URL, ids)
 # Market = every tracked game, not just the selected ones.
 all_prices = analysis.to_timezone(q_prices(DB_URL, tuple(NAME)), ["ts"], TZ)
 market_sales = analysis.market_sale_periods(all_prices)
@@ -288,7 +294,7 @@ if not players.empty:
 
 
 def latest_table() -> pd.DataFrame:
-    health = analysis.health_scores(players, reviews, owners).set_index("appid")
+    health = analysis.health_scores(players, reviews, owners, sentiment).set_index("appid")
     rows = []
     for a in ids:
         p = players[players["appid"] == a].sort_values("ts")
@@ -647,7 +653,7 @@ with tab_patterns:
 # --------------------------------------------------------------------------- owners
 
 with tab_owners:
-    hs = analysis.health_scores(players, reviews, owners)
+    hs = analysis.health_scores(players, reviews, owners, sentiment)
     if not hs.empty and hs["health"].notna().any():
         st.subheader("Health score")
         hs.insert(0, "Game", hs["appid"].map(NAME))
@@ -699,6 +705,50 @@ with tab_owners:
             style(fig, height=360, y_title="% positive reviews")
             fig.update_yaxes(rangemode="normal", ticksuffix="%")
             show(fig, title="Review score (SteamSpy)")
+
+    st.subheader("Review sentiment (Steam)")
+    weekly = analysis.weekly_sentiment(sentiment)
+    if weekly.empty:
+        st.caption("Collected once a day from Steam's review totals; the weekly % positive appears after two "
+                   "daily snapshots.")
+    else:
+        st.caption("% positive of the reviews **written that week** (Steam's all-language totals), so a bad patch "
+                   "shows up here long before it moves the all-time score. ✕ = review bomb.")
+        bombs = analysis.review_bombs(sentiment, events)
+        fig = go.Figure()
+        for a in ids:
+            d = weekly[weekly["appid"] == a]
+            if d.empty:
+                continue
+            fig.add_trace(go.Scatter(x=d["week"], y=d["week_positive_pct"], mode="lines+markers", name=NAME[a],
+                                     line=dict(color=COLOR[a], width=2), marker=dict(size=7),
+                                     customdata=d["reviews"],
+                                     hovertemplate=NAME[a] + ": %{y:.1f}% positive (%{customdata:,.0f} reviews)"
+                                                             "<extra></extra>"))
+            b = bombs[bombs["appid"] == a]
+            if not b.empty:
+                wk = b["date"].dt.to_period("W-SUN").dt.start_time
+                y = d.set_index("week")["week_positive_pct"].reindex(wk).values
+                fig.add_trace(go.Scatter(x=wk, y=y, mode="markers", name="Review bomb", showlegend=False,
+                                         marker=dict(symbol="x", size=13, color=C["down"],
+                                                     line=dict(color=C["surface"], width=1)),
+                                         customdata=b["new_negative"],
+                                         hovertemplate="Review bomb: %{customdata:,.0f} negative in a day"
+                                                       "<extra></extra>"))
+        style(fig, height=360, y_title="% positive (reviews that week)")
+        fig.update_yaxes(rangemode="normal", ticksuffix="%")
+        show(fig, title="Weekly review sentiment")
+        if not bombs.empty:
+            bt = bombs.copy()
+            bt.insert(0, "Game", bt["appid"].map(NAME))
+            st.dataframe(bt[["Game", "date", "new_negative", "usual_negative", "negative_share", "related_event"]]
+                         .sort_values("date", ascending=False).rename(columns={
+                             "date": "Day (UTC)", "new_negative": "Negative reviews", "usual_negative": "Usual per day",
+                             "negative_share": "% negative that day", "related_event": "Event in the 3 days before"}),
+                         hide_index=True, width="stretch",
+                         column_config={"Negative reviews": st.column_config.NumberColumn(format="%.0f"),
+                                        "Usual per day": st.column_config.NumberColumn(format="%.0f"),
+                                        "% negative that day": st.column_config.NumberColumn(format="%.0f%%")})
 
     new_rev = reviews.dropna(subset=["new_reviews"]) if not reviews.empty else reviews
     if new_rev.empty:

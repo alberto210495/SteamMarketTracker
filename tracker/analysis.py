@@ -585,3 +585,76 @@ def health_scores(players: pd.DataFrame, reviews: pd.DataFrame, owners: pd.DataF
         row["components"] = len(comp)
         rows.append(row)
     return pd.DataFrame(rows, columns=cols)
+
+
+def load_sentiment(engine: Engine, appids: list[int]) -> pd.DataFrame:
+    """Daily Steam review split, with new positive/negative reviews per day
+    (spread evenly over any gap) and the running % positive."""
+    t = db.review_score_snapshots
+    cols = ["appid", "date", "total_positive", "total_negative", "review_score", "review_score_desc",
+            "new_positive", "new_negative", "positive_pct"]
+    try:
+        df = _read(engine, select(t).where(t.c.appid.in_(appids)).order_by(t.c.date))
+    except (OperationalError, ProgrammingError):  # table not created yet
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["appid", "date"])
+    days = df.groupby("appid")["date"].diff().dt.days
+    for side in ("positive", "negative"):
+        df[f"new_{side}"] = (df.groupby("appid")[f"total_{side}"].diff() / days).clip(lower=0)
+    total = df["total_positive"] + df["total_negative"]
+    df["positive_pct"] = (df["total_positive"] / total.where(total > 0)) * 100
+    return df[cols]
+
+
+def weekly_sentiment(sent: pd.DataFrame) -> pd.DataFrame:
+    """% positive of the reviews written each week (not the all-time score)."""
+    cols = ["appid", "week", "new_positive", "new_negative", "reviews", "week_positive_pct"]
+    d = sent.dropna(subset=["new_positive", "new_negative"]) if not sent.empty else sent
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    w = (d.set_index("date").groupby("appid")[["new_positive", "new_negative"]].resample("W-MON", label="left",
+                                                                                         closed="left").sum()
+         .reset_index().rename(columns={"date": "week"}))
+    w["reviews"] = w["new_positive"] + w["new_negative"]
+    w = w[w["reviews"] > 0]
+    w["week_positive_pct"] = w["new_positive"] / w["reviews"] * 100
+    return w[cols]
+
+
+def review_bombs(sent: pd.DataFrame, events: pd.DataFrame | None = None, min_negative: int = 30,
+                 lookback_days: int = 14) -> pd.DataFrame:
+    """Days with a burst of negative reviews (same rule as the Discord alert), with the
+    most recent patch / announcement in the 3 days before, if any."""
+    from .alerts import is_review_bomb
+
+    cols = ["appid", "date", "new_negative", "new_positive", "usual_negative", "negative_share", "related_event"]
+    d = sent.dropna(subset=["new_negative"]) if not sent.empty else sent
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for appid, g in d.sort_values("date").groupby("appid"):
+        g = g.reset_index(drop=True)
+        for i, r in g.iterrows():
+            hist = g[(g["date"] < r["date"]) & (g["date"] >= r["date"] - timedelta(days=lookback_days))]
+            if len(hist) < 3:
+                continue
+            if not is_review_bomb(r["new_negative"], r["new_positive"], hist["new_negative"].tolist(), min_negative):
+                continue
+            related = None
+            if events is not None and not events.empty:
+                ev = events[(events["appid"] == appid) & events["kind"].isin(["patch", "announcement", "price_change",
+                                                                              "manual"])
+                            & (events["ts"] <= r["date"] + timedelta(days=1))
+                            & (events["ts"] >= r["date"] - timedelta(days=3))]
+                if not ev.empty:
+                    e = ev.sort_values("ts").iloc[-1]
+                    related = f"{e['kind']}: {e['title']}"
+            total = r["new_negative"] + r["new_positive"]
+            rows.append({"appid": appid, "date": r["date"], "new_negative": r["new_negative"],
+                         "new_positive": r["new_positive"], "usual_negative": float(hist["new_negative"].median()),
+                         "negative_share": r["new_negative"] / total * 100 if total else None,
+                         "related_event": related})
+    return pd.DataFrame(rows, columns=cols)

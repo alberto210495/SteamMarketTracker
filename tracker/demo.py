@@ -108,8 +108,20 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
             total += int(daily_peak[day] * rng.uniform(0.003, 0.006))
             reviews.append({"appid": appid, "date": day, "total_reviews": total})
 
+        # Steam review split; the first game gets a review bomb the day after its first patch.
+        pos_t, neg_t = total * (1 - neg_ratio), total * neg_ratio
+        bomb_day = (sorted(patches)[0] + timedelta(days=1)).date() if appid == DEMO_GAMES[0][0] else None
+        sentiment = []
+        for day in sorted(daily_peak):
+            new = daily_peak[day] * rng.uniform(0.003, 0.006)
+            pos_t += new * (1 - neg_ratio)
+            neg_t += new * neg_ratio + (new * 4 if day == bomb_day else 0)
+            sentiment.append({"appid": appid, "date": day, "total_positive": int(pos_t), "total_negative": int(neg_t),
+                              "review_score": 8, "review_score_desc": "Very Positive"})
+
         db.insert_ignore(engine, db.player_snapshots, players)
         db.insert_ignore(engine, db.price_snapshots, prices)
         db.insert_ignore(engine, db.events, events)
         db.insert_ignore(engine, db.owner_snapshots, owners)
         db.insert_ignore(engine, db.review_snapshots, reviews)
+        db.insert_ignore(engine, db.review_score_snapshots, sentiment)

@@ -49,6 +49,8 @@ class AlertsConfig:
     spike_min_increase: int = 200   # ... and at least this many extra players
     daily_summary: bool = True
     daily_summary_hour_utc: int = 14
+    review_bombs: bool = True       # a day with far more negative reviews than usual
+    review_bomb_min_negative: int = 30
 
 
 def discord_webhook_url() -> str | None:

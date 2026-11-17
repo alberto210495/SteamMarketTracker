@@ -13,6 +13,8 @@ spike_ratio = 1.5             # ...at least 1.5x the usual level
 spike_min_increase = 200      # ...and at least 200 more players than usual
 daily_summary = true
 daily_summary_hour_utc = 14   # 14:00 UTC = 8:00 in Central time (CST)
+review_bombs = true           # a day with far more negative reviews than usual
+review_bomb_min_negative = 30 # ...and at least this many negative reviews that day
 
 [[games]]
 appid = 730

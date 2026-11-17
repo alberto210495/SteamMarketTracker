@@ -25,7 +25,7 @@ def _cmd_collect(args) -> int:
         print(f"Unknown step(s): {', '.join(sorted(bad))}. Valid: {', '.join(collect.ALL_STEPS)}", file=sys.stderr)
         return 2
     stats = collect.run(steps)
-    total = stats.players + stats.prices + stats.news + stats.owners + stats.metadata
+    total = stats.players + stats.prices + stats.news + stats.owners + stats.metadata + stats.sentiment
     # Fail the job only if nothing at all was collected (e.g. Steam is down / we're blocked);
     # partial failures are logged but shouldn't spam CI with red runs.
     return 1 if total == 0 and stats.failures else 0
