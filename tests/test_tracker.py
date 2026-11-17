@@ -482,3 +482,14 @@ def test_event_retention_half_life_and_return():
     assert r["half_life_days"] == 3          # 1400 is the first day within half of the +1000 gain
     assert r["days_to_baseline"] == 5 and r["status"] == "back to baseline"
     assert out.loc["manual", "status"] == "no bump"
+
+
+def test_weekly_profile_and_summary():
+    # Busy at 20:00 every day, twice as busy on weekends
+    players = hourly(1, "2026-03-02", 14, lambda t: (200 if t.hour == 20 else 100) * (2 if t.weekday() >= 5 else 1))
+    prof = analysis.weekly_profile(players)
+    assert len(prof) == 7 * 24 and prof["samples"].eq(2).all()
+    assert prof["rel"].mean() == pytest.approx(100)
+    s = analysis.profile_summary(prof).iloc[0]
+    assert s["peak_hour"] == 20 and s["peak_day"] in ("Sat", "Sun")
+    assert s["weekend_pct"] == pytest.approx(100)

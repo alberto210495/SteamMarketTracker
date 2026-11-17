@@ -111,6 +111,9 @@ discount bracket shows where deeper discounts stop paying off.
 **How long bumps last** (same tab) follows each event's daily peaks for up to 30 days: peak lift in the first
 week, *half-life* (days until half the gain is gone) and days until players are back within 10% of the baseline.
 
+The **Patterns** tab shows each game's weekly rhythm: a weekday × hour heatmap of average players (in your time
+zone), the busiest and quietest hour, and how much busier weekends are.
+
 This is still correlation, not causation. Patches often ship at the same time as sales, and a single game's news
 (a streamer, a trailer) won't show up in the market baseline.
 

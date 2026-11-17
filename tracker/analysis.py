@@ -224,6 +224,43 @@ def event_impact(players: pd.DataFrame, events: pd.DataFrame, window_days: int =
     return pd.DataFrame(out, columns=cols).sort_values("ts", ascending=False, ignore_index=True)
 
 
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def weekly_profile(players: pd.DataFrame) -> pd.DataFrame:
+    """Average players by weekday x hour per game, plus `rel` = % of that game's
+    overall average (100 = a normal hour). Timestamps are used as given, so pass
+    them already converted to the viewer's time zone."""
+    cols = ["appid", "weekday", "hour", "players", "samples", "rel"]
+    if players.empty:
+        return pd.DataFrame(columns=cols)
+    df = players.dropna(subset=["players"]).copy()
+    df["weekday"] = df["ts"].dt.dayofweek
+    df["hour"] = df["ts"].dt.hour
+    out = (df.groupby(["appid", "weekday", "hour"])["players"].agg(players="mean", samples="size")
+           .reset_index())
+    # Normalise by the mean of the cells (not of the samples) so missing hours don't skew it.
+    out["rel"] = out["players"] / out.groupby("appid")["players"].transform("mean") * 100
+    return out[cols]
+
+
+def profile_summary(profile: pd.DataFrame) -> pd.DataFrame:
+    """Busiest / quietest weekday-hour and the weekend effect, per game."""
+    cols = ["appid", "peak_day", "peak_hour", "low_day", "low_hour", "peak_to_low", "weekend_pct"]
+    if profile.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for appid, g in profile.groupby("appid"):
+        hi, lo = g.loc[g["players"].idxmax()], g.loc[g["players"].idxmin()]
+        weekend = g[g["weekday"] >= 5]["players"].mean()
+        weekday = g[g["weekday"] < 5]["players"].mean()
+        rows.append({"appid": appid, "peak_day": WEEKDAYS[int(hi["weekday"])], "peak_hour": int(hi["hour"]),
+                     "low_day": WEEKDAYS[int(lo["weekday"])], "low_hour": int(lo["hour"]),
+                     "peak_to_low": hi["players"] / lo["players"] if lo["players"] else None,
+                     "weekend_pct": (weekend / weekday - 1) * 100 if weekday and pd.notna(weekend) else None})
+    return pd.DataFrame(rows, columns=cols)
+
+
 def _bucket_peaks(series: pd.Series, lo: pd.Timestamp, days: int) -> pd.Series:
     """Peak per 24h bucket starting at `lo` (index 0..days-1; missing buckets absent)."""
     win = series[(series.index >= lo) & (series.index < lo + timedelta(days=days))]

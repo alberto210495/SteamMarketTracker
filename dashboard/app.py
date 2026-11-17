@@ -326,8 +326,9 @@ st.dataframe(
     },
 )
 
-tab_players, tab_prices, tab_impact, tab_compare, tab_owners, tab_data, tab_manage = st.tabs(
-    ["Players", "Prices & sales", "Event impact", "Compare trends", "Owners & reviews", "Data", "Manage games"])
+tab_players, tab_prices, tab_impact, tab_compare, tab_patterns, tab_owners, tab_data, tab_manage = st.tabs(
+    ["Players", "Prices & sales", "Event impact", "Compare trends", "Patterns", "Owners & reviews", "Data",
+     "Manage games"])
 
 # --------------------------------------------------------------------------- players
 
@@ -575,6 +576,39 @@ with tab_compare:
         fig.update_yaxes(rangemode="normal")
         fig.update_layout(margin=dict(r=170 if len(ids) <= 4 else 8))
         show(fig, title="Relative player trend")
+
+# --------------------------------------------------------------------------- patterns
+
+with tab_patterns:
+    st.caption(f"When each game's audience is online: average players by weekday and hour ({TZ_LABEL}), "
+               "over the selected time range. 100 = an average hour for that game.")
+    profile = analysis.weekly_profile(players_r)
+    if profile.empty or profile["samples"].sum() < 24 * 7:
+        st.info("Needs at least a week of hourly samples in the selected range.")
+    else:
+        summary = analysis.profile_summary(profile)
+        summary.insert(0, "Game", summary["appid"].map(NAME))
+        summary["Busiest"] = summary["peak_day"] + " " + summary["peak_hour"].map("{:02d}:00".format)
+        summary["Quietest"] = summary["low_day"] + " " + summary["low_hour"].map("{:02d}:00".format)
+        st.dataframe(summary[["Game", "Busiest", "Quietest", "peak_to_low", "weekend_pct"]].rename(columns={
+            "peak_to_low": "Busiest ÷ quietest", "weekend_pct": "Weekend vs weekdays"}),
+            hide_index=True, width="stretch",
+            column_config={"Busiest ÷ quietest": st.column_config.NumberColumn(format="%.1f×"),
+                           "Weekend vs weekdays": st.column_config.NumberColumn(format="%+.0f%%")})
+        pick = st.selectbox("Heatmap for", ids, format_func=lambda a: NAME[a], key="pattern_game")
+        g = profile[profile["appid"] == pick]
+        grid = g.pivot(index="weekday", columns="hour", values="rel").reindex(index=range(7), columns=range(24))
+        raw = g.pivot(index="weekday", columns="hour", values="players").reindex(index=range(7), columns=range(24))
+        fig = go.Figure(go.Heatmap(
+            z=grid.values, x=[f"{h:02d}" for h in range(24)], y=analysis.WEEKDAYS, customdata=raw.values,
+            colorscale=[[0, C["surface"]], [1, COLOR[pick]]], xgap=2, ygap=2,
+            colorbar=dict(title=dict(text="% of avg", font=dict(color=C["muted"])), tickfont=dict(color=C["muted"]),
+                          ticksuffix="%", outlinewidth=0),
+            hovertemplate="%{y} %{x}:00<br>%{z:.0f}% of average<br>~%{customdata:,.0f} players<extra></extra>"))
+        style(fig, height=320, legend=False).update_layout(hovermode="closest")
+        fig.update_xaxes(showspikes=False, title_text=f"Hour ({TZ_LABEL})", title_font=dict(color=C["muted"]))
+        fig.update_yaxes(autorange="reversed", showgrid=False, rangemode=None)
+        show(fig, title=f"{NAME[pick]} · weekly rhythm")
 
 # --------------------------------------------------------------------------- owners
 
