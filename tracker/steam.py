@@ -33,6 +33,20 @@ class HttpClient:
         self.session.headers["User-Agent"] = USER_AGENT
 
     def get_json(self, url: str, params: dict[str, Any] | None = None) -> Any | None:
+        resp = self._get(url, params)
+        if resp is None:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            log.warning("Non-JSON response from %s", url)
+            return None
+
+    def get_text(self, url: str, params: dict[str, Any] | None = None) -> str | None:
+        resp = self._get(url, params)
+        return resp.text if resp is not None else None
+
+    def _get(self, url: str, params: dict[str, Any] | None = None) -> requests.Response | None:
         delay = 2.0
         for attempt in range(1, self.retries + 1):
             wait = self.min_interval - (time.monotonic() - self._last)
@@ -45,11 +59,7 @@ class HttpClient:
                 log.warning("GET %s failed (%s), attempt %d/%d", url, exc, attempt, self.retries)
             else:
                 if resp.status_code == 200:
-                    try:
-                        return resp.json()
-                    except ValueError:
-                        log.warning("Non-JSON response from %s", url)
-                        return None
+                    return resp
                 if resp.status_code in (429, 500, 502, 503, 504):
                     retry_after = resp.headers.get("Retry-After")
                     if retry_after and retry_after.isdigit():
@@ -133,6 +143,15 @@ def parse_review_summary(data: dict[str, Any] | None) -> dict[str, Any] | None:
             "review_score_desc": (qs.get("review_score_desc") or None) and str(qs["review_score_desc"])[:64]}
 
 
+_MEMBER_COUNT_RE = re.compile(r"<memberCount>\s*(\d+)\s*</memberCount>")
+
+
+def parse_member_count(xml: str | None) -> int | None:
+    """Community hub followers from steamcommunity.com/games/<appid>/memberslistxml/?xml=1."""
+    m = _MEMBER_COUNT_RE.search(xml or "")
+    return int(m.group(1)) if m else None
+
+
 _PATCH_RE = re.compile(
     r"\b(patch|hotfix|hot-fix|update|changelog|release notes|v\d+(\.\d+)+|version \d)",
     re.IGNORECASE,
@@ -165,6 +184,7 @@ class SteamClient:
         self.store = HttpClient(min_interval=1.6)
         # SteamSpy asks for at most 1 request per second.
         self.spy = HttpClient(min_interval=1.1)
+        self.community = HttpClient(min_interval=1.6)
 
     def _web_params(self, **params: Any) -> dict[str, Any]:
         if self.api_key:
@@ -212,6 +232,12 @@ class SteamClient:
                                    {"json": 1, "language": "all", "purchase_type": "all", "filter": "recent",
                                     "num_per_page": 1})
         return parse_review_summary(data)
+
+    def followers(self, appid: int) -> int | None:
+        """Members of the game's community hub group: what SteamDB calls followers,
+        the closest public stand-in for wishlists."""
+        return parse_member_count(self.community.get_text(
+            f"https://steamcommunity.com/games/{appid}/memberslistxml/", {"xml": 1}))
 
     def news(self, appid: int, count: int = 20) -> list[dict[str, Any]]:
         data = self.web.get_json(

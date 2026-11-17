@@ -197,6 +197,11 @@ def q_twitch(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
     return analysis.load_twitch(_engine_for(url), list(appids))
 
 
+@st.cache_data(ttl=300)
+def q_followers(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_followers(_engine_for(url), list(appids))
+
+
 @st.cache_data(ttl=60)
 def q_tracked(url: str) -> list[int] | None:
     """games.toml + dashboard additions - removals; None if the table doesn't exist yet."""
@@ -832,6 +837,44 @@ with tab_owners:
                          column_config={"Negative reviews": st.column_config.NumberColumn(format="%.0f"),
                                         "Usual per day": st.column_config.NumberColumn(format="%.0f"),
                                         "% negative that day": st.column_config.NumberColumn(format="%.0f%%")})
+
+    st.subheader("Followers & upcoming releases")
+    all_followers = q_followers(DB_URL, tuple(NAME))
+    fsum = analysis.follower_summary(games[games["appid"].isin(list(NAME))], all_followers, db.utcnow())
+    upcoming = fsum[fsum["status"] == "upcoming"]
+    if not upcoming.empty:
+        st.markdown("**Upcoming:** " + ", ".join(
+            f"{NAME.get(r.appid, r.name)} ({r.release_date})" for r in upcoming.itertuples()))
+    if all_followers.empty:
+        st.caption("Follower counts (members of each game's Steam community hub, the closest public stand-in for "
+                   "wishlists) are collected once a day.")
+    else:
+        st.caption("Followers = members of the game's Steam community hub. Before launch it's the best public "
+                   "proxy for wishlists; growth matters more than the total. Add an unreleased game in "
+                   "*Manage games* to watch its hype build.")
+        ft = fsum[fsum["followers"].notna()].copy()
+        ft["Game"] = ft["appid"].map(NAME)
+        st.dataframe(ft.sort_values("followers", ascending=False)[
+            ["Game", "status", "release_date", "followers", "new_7d", "new_30d", "growth_7d_pct"]].rename(columns={
+                "status": "Status", "release_date": "Release date", "followers": "Followers", "new_7d": "New (7d)",
+                "new_30d": "New (30d)", "growth_7d_pct": "Growth (7d)"}),
+            hide_index=True, width="stretch",
+            column_config={c: st.column_config.NumberColumn(format="localized")
+                           for c in ("Followers", "New (7d)", "New (30d)")}
+            | {"Growth (7d)": st.column_config.NumberColumn(format="%+.2f%%")})
+        fd = all_followers[all_followers["appid"].isin(ids)].dropna(subset=["new_followers"])
+        if not fd.empty:
+            fig = go.Figure()
+            for a in ids:
+                d = fd[fd["appid"] == a]
+                if d.empty:
+                    continue
+                fig.add_trace(go.Scatter(x=d["date"], y=d["new_followers"].clip(lower=0), mode="lines",
+                                         name=NAME[a], line=dict(color=COLOR[a], width=2),
+                                         customdata=d["followers"],
+                                         hovertemplate=NAME[a] + ": +%{y:,.0f} (total %{customdata:,})<extra></extra>"))
+            style(fig, height=320, y_title="New followers per day")
+            show(fig, title="New followers per day")
 
     new_rev = reviews.dropna(subset=["new_reviews"]) if not reviews.empty else reviews
     if new_rev.empty:

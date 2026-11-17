@@ -131,7 +131,13 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
             twitch.append({"appid": appid, "ts": r["ts"], "viewers": int(ahead * ratio * rng.uniform(0.85, 1.15)),
                            "streams": max(1, int(ahead * ratio / 60)), "twitch_game_id": str(appid)})
 
+        fol, followers = base * 25, []
+        for day in sorted(daily_peak):
+            fol += int(daily_peak[day] * rng.uniform(0.01, 0.03))
+            followers.append({"appid": appid, "date": day, "followers": fol})
+
         db.insert_ignore(engine, db.player_snapshots, players)
+        db.insert_ignore(engine, db.follower_snapshots, followers)
         db.insert_ignore(engine, db.twitch_snapshots, twitch)
         db.insert_ignore(engine, db.price_snapshots, prices)
         db.insert_ignore(engine, db.events, events)

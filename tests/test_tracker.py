@@ -107,6 +107,9 @@ class FakeClient:
     def news(self, appid):
         return [{"gid": "123", "title": "Patch 1.1", "url": "https://x", "date": 1_700_000_000, "tags": []}]
 
+    def followers(self, appid):
+        return 10_000 + appid
+
     def review_summary(self, appid):
         return {"total_positive": 900 + appid, "total_negative": 100, "review_score": 8,
                 "review_score_desc": "Very Positive"}
@@ -678,3 +681,46 @@ def test_twitch_lead_lag_finds_lead():
     viewers = pd.DataFrame({"appid": 1, "ts": ts, "viewers": np.roll(level, -3) / 10})  # viewers 3h ahead
     out = analysis.twitch_lead_lag(players, viewers.iloc[:-3]).iloc[0]
     assert out["best_lag_h"] == 3 and out["best_corr"] > 0.9
+
+
+
+# --------------------------------------------------------------------------- followers & release dates
+
+def test_parse_member_count():
+    from tracker.steam import parse_member_count
+    xml = "<memberList><groupID64>1</groupID64><groupDetails><groupName>x</groupName>" \
+          "<memberCount>1234567</memberCount><membersInChat>5</membersInChat></groupDetails></memberList>"
+    assert parse_member_count(xml) == 1_234_567
+    assert parse_member_count("<html>error</html>") is None and parse_member_count(None) is None
+
+
+def test_collect_followers_daily(engine, monkeypatch):
+    monkeypatch.setattr(db, "utcnow", lambda: datetime(2026, 1, 1, 10))
+    games = config.GamesConfig(country="us", appids=[1])
+    assert collect.run(engine=engine, client=FakeClient(), games=games).followers == 1
+    assert collect.run(engine=engine, client=FakeClient(), games=games).followers == 0
+    assert analysis.load_followers(engine, [1]).iloc[0]["followers"] == 10_001
+
+
+@pytest.mark.parametrize("text,status,guess", [
+    ("26 Feb, 2016", "released", datetime(2016, 2, 26)),
+    ("Feb 26, 2030", "upcoming", datetime(2030, 2, 26)),
+    ("Coming soon", "upcoming", None),
+    ("To be announced", "upcoming", None),
+    ("Q2 2027", "upcoming", datetime(2027, 6, 30)),
+    ("March 2027", "upcoming", datetime(2027, 3, 31)),
+    ("2026", "upcoming", datetime(2026, 12, 31)),
+    ("2025", "released", datetime(2025, 12, 31)),
+    ("", "unknown", None),
+])
+def test_release_status(text, status, guess):
+    assert analysis.release_status(text, datetime(2026, 11, 16)) == (status, guess)
+
+
+def test_follower_summary_growth():
+    games_df = pd.DataFrame([{"appid": 1, "name": "G", "release_date": "Coming soon"}])
+    f = pd.DataFrame({"appid": 1, "date": pd.date_range("2026-01-01", periods=31, freq="D"),
+                      "followers": [1000 + 10 * i for i in range(31)]})
+    s = analysis.follower_summary(games_df, f, datetime(2026, 2, 1)).iloc[0]
+    assert s["status"] == "upcoming" and s["followers"] == 1300
+    assert s["new_7d"] == 70 and s["new_30d"] == 300

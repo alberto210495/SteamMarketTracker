@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 METADATA_MAX_AGE = timedelta(days=7)
 ALL_STEPS = ("metadata", "players", "prices", "regional_prices", "twitch", "news", "owners", "reviews",
-             "sentiment", "alerts")  # alerts run last
+             "sentiment", "followers", "alerts")  # alerts run last
 
 
 @dataclass
@@ -33,13 +33,14 @@ class RunStats:
     reviews: int = 0
     sentiment: int = 0
     twitch: int = 0
+    followers: int = 0
     metadata: int = 0
     failures: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         s = (f"players={self.players} prices={self.prices} price_events={self.events} "
              f"news={self.news} owners={self.owners} reviews={self.reviews} sentiment={self.sentiment} "
-             f"twitch={self.twitch} "
+             f"twitch={self.twitch} followers={self.followers} "
              f"metadata={self.metadata}")
         if self.failures:
             s += f" failures={len(self.failures)}"
@@ -230,6 +231,21 @@ def collect_sentiment(engine: Engine, client: SteamClient, appids: list[int], ts
         stats.sentiment += 1
 
 
+def collect_followers(engine: Engine, client: SteamClient, appids: list[int], ts: datetime,
+                      stats: RunStats) -> None:
+    """Community hub followers, once per UTC day."""
+    day = ts.date()
+    for appid in appids:
+        if db.has_snapshot(engine, db.follower_snapshots, appid, day):
+            continue
+        n = client.followers(appid)
+        if n is None:
+            stats.failures.append(f"followers:{appid}")
+            continue
+        db.insert_ignore(engine, db.follower_snapshots, [{"appid": appid, "date": day, "followers": n}])
+        stats.followers += 1
+
+
 def collect_twitch(engine: Engine, twitch, appids: list[int], names: dict[int, str], ts: datetime,
                    stats: RunStats) -> None:
     """Live Twitch viewers per game, matched by name (override with `twitch_name` in games.toml)."""
@@ -278,6 +294,7 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         "owners": lambda: collect_owners(engine, client, appids, ts, stats),
         "reviews": lambda: collect_reviews(engine, client, appids, games.country, ts, stats),
         "sentiment": lambda: collect_sentiment(engine, client, appids, ts, stats),
+        "followers": lambda: collect_followers(engine, client, appids, ts, stats),
     }
     if twitch is None and (creds := config.twitch_credentials()):
         from .twitch import TwitchClient

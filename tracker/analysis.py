@@ -737,3 +737,81 @@ def twitch_lead_lag(players: pd.DataFrame, twitch: pd.DataFrame, max_lag: int = 
                      "viewers_per_100_players": float(df["v"].mean() / df["p"].mean() * 100) if df["p"].mean() else None,
                      "best_lag_h": best, "best_corr": corrs[best], "corr_at_0": corrs.get(0)})
     return pd.DataFrame(rows, columns=cols)
+
+
+def load_followers(engine: Engine, appids: list[int]) -> pd.DataFrame:
+    """Daily follower counts plus `new_followers` per day (spread evenly over gaps)."""
+    t = db.follower_snapshots
+    cols = ["appid", "date", "followers", "new_followers"]
+    try:
+        df = _read(engine, select(t).where(t.c.appid.in_(appids)).order_by(t.c.date))
+    except (OperationalError, ProgrammingError):  # table not created yet
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["appid", "date"])
+    days = df.groupby("appid")["date"].diff().dt.days
+    df["new_followers"] = df.groupby("appid")["followers"].diff() / days
+    return df[cols]
+
+
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                                       "dec"], 1)}
+
+
+def release_status(release_date: str | None, today: datetime) -> tuple[str, datetime | None]:
+    """('upcoming' | 'released' | 'unknown', best-guess date) from Steam's free-text
+    release date: '26 Feb, 2016', 'Feb 26, 2016', 'March 2027', 'Q2 2027', '2027',
+    'Coming soon', 'To be announced'. Vague dates resolve to the end of the period."""
+    import re
+
+    text = (release_date or "").strip()
+    low = text.lower()
+    if not text:
+        return "unknown", None
+    if any(k in low for k in ("coming soon", "to be announced", "tba", "tbd", "when it's done")):
+        return "upcoming", None
+    for fmt in ("%d %b, %Y", "%b %d, %Y", "%d %B, %Y", "%B %d, %Y", "%d %b %Y", "%Y-%m-%d"):
+        try:
+            d = datetime.strptime(text, fmt)
+            return ("upcoming" if d.date() > today.date() else "released"), d
+        except ValueError:
+            pass
+    year = re.search(r"(20\d\d)", low)
+    if not year:
+        return "unknown", None
+    y = int(year.group(1))
+    q = re.search(r"q([1-4])", low)
+    month = next((n for m, n in _MONTHS.items() if m in low), None)
+    if q:
+        end_month = int(q.group(1)) * 3
+    elif month:
+        end_month = month
+    else:
+        end_month = 12
+    end = datetime(y + end_month // 12, end_month % 12 + 1, 1) - timedelta(days=1)
+    return ("upcoming" if end.date() >= today.date() else "released"), end
+
+
+def follower_summary(games_df: pd.DataFrame, followers: pd.DataFrame, today: datetime) -> pd.DataFrame:
+    """Per game: release status, followers now, growth over 7 / 30 days."""
+    cols = ["appid", "name", "release_date", "status", "release_guess", "followers", "new_7d", "new_30d",
+            "growth_7d_pct"]
+    rows = []
+    for g in games_df.itertuples():
+        status, guess = release_status(getattr(g, "release_date", None), today)
+        f = followers[followers["appid"] == g.appid].sort_values("date") if not followers.empty else followers
+        now = f["followers"].iloc[-1] if not f.empty else None
+
+        def back(days):
+            if f.empty:
+                return None
+            past = f[f["date"] <= f["date"].max() - timedelta(days=days)]
+            return now - past["followers"].iloc[-1] if not past.empty else None
+
+        n7, n30 = back(7), back(30)
+        rows.append({"appid": g.appid, "name": g.name, "release_date": getattr(g, "release_date", None),
+                     "status": status, "release_guess": guess, "followers": now, "new_7d": n7, "new_30d": n30,
+                     "growth_7d_pct": n7 / (now - n7) * 100 if n7 is not None and now and now - n7 > 0 else None})
+    return pd.DataFrame(rows, columns=cols)

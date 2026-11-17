@@ -58,6 +58,7 @@ frankfurter.app and marks the cheapest region); sales, alerts and charts use `co
 | Steam review total | storefront `appdetails` (`recommendations.total`) | once per UTC day | New reviews per day = difference between days |
 | Positive / negative reviews | `store.steampowered.com/appreviews` (`query_summary`) | once per UTC day | Steam's own all-language totals; daily differences give the weekly sentiment |
 | Twitch viewers (optional) | Twitch Helix `streams` | every run | Needs `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`; sums the top 1,000 live streams |
+| Followers | `steamcommunity.com/games/<appid>/memberslistxml` (`memberCount`) | once per UTC day | Community hub members, the best public proxy for wishlists before launch |
 | Name, developer, etc. | storefront `appdetails` | weekly | |
 
 No API key is required. If you set `STEAM_API_KEY` it is sent with Web API calls.
@@ -130,6 +131,10 @@ zone), the busiest and quietest hour, and how much busier weekends are.
 **Review sentiment** (*Owners & reviews*) charts the % positive of the reviews written each week, so a bad patch
 shows up long before it moves the all-time score. Review bombs are marked and listed with any patch or announcement
 in the 3 days before.
+
+**Followers & upcoming releases** (*Owners & reviews*): follower totals and growth for every tracked game, a daily
+chart for the selected ones, and a list of games whose Steam release date is still in the future (or "Coming soon").
+Track an unreleased game from *Manage games* to watch its hype build.
 
 **Health score** (0–100, first column of the overview table; breakdown on *Owners & reviews*): 40% player momentum
 (average daily peak, last 7 days vs. the 21 before), 20% review velocity (new reviews per day, same windows) and 40%
