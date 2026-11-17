@@ -50,6 +50,9 @@ class AlertsConfig:
     spikes: bool = True             # players well above the usual level for that hour
     spike_ratio: float = 1.5        # ... at least this many times the usual level
     spike_min_increase: int = 200   # ... and at least this many extra players
+    drops: bool = True              # players well below the usual level (collapse or server outage)
+    drop_ratio: float = 0.5         # ... at most this fraction of the usual level
+    drop_min_decrease: int = 200    # ... and at least this many fewer players
     daily_summary: bool = True
     daily_summary_hour_utc: int = 14
     review_bombs: bool = True       # a day with far more negative reviews than usual

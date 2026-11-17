@@ -84,6 +84,7 @@ collection run posts:
 | Review bomb | a day's new negative reviews are ≥30, the majority of that day's reviews, and ≥3× the usual daily negatives (14-day median) |
 | Price target | a game's price drops to or below its `target_price` (set per game in games.toml); once per drop |
 | All-time low | a discounted game reaches its lowest price since tracking began (after 30 days of history); once per drop |
+| Player drop | players are ≤0.5× (and ≥200 below) the usual level for that hour; flags a likely outage when under 10%. Same history and cooldown rules as spikes. |
 | Daily summary | once a day, first run after 14:00 UTC: each game's 24h peak, change vs. the day before, current price |
 | Weekly digest | Mondays (configurable), first run after the daily summary hour: biggest movers (average daily peak vs. the week before), games on sale and patches of the past week |
 

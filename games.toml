@@ -13,6 +13,9 @@ patches = true                # new patch notes posted on Steam
 spikes = true                 # players far above the usual level for that hour of day
 spike_ratio = 1.5             # ...at least 1.5x the usual level
 spike_min_increase = 200      # ...and at least 200 more players than usual
+drops = true                  # players far below the usual level (a collapse or a server outage)
+drop_ratio = 0.5              # ...at most half the usual level
+drop_min_decrease = 200       # ...and at least 200 fewer players than usual
 daily_summary = true
 daily_summary_hour_utc = 14   # 14:00 UTC = 8:00 in Central time (CST)
 review_bombs = true           # a day with far more negative reviews than usual

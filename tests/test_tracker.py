@@ -272,7 +272,7 @@ def _event(engine, appid, ts, kind, title, source):
                                            "url": None, "detail": "{}", "source_id": source}])
 
 
-NO_EXTRAS = AlertsConfig(spikes=False, daily_summary=False)
+NO_EXTRAS = AlertsConfig(spikes=False, drops=False, daily_summary=False)
 
 
 def test_first_alert_run_does_not_flood_then_sends_only_new_events(engine):
@@ -801,7 +801,7 @@ def test_weekly_digest_once_per_week(engine):
     db.insert_ignore(engine, db.player_snapshots, rows)
     _prices(engine, 1, now - timedelta(hours=1), [1000])
     _event(engine, 2, now - timedelta(days=2), "patch", "Hotfix 1.0.1", "p1")
-    cfg = AlertsConfig(sales=False, patches=False, spikes=False, daily_summary=False, review_bombs=False,
+    cfg = AlertsConfig(sales=False, patches=False, spikes=False, drops=False, daily_summary=False, review_bombs=False,
                        price_targets=False, all_time_lows=False)
     send = FakeSender()
     alerts_mod.process(engine, cfg, [1, 2], send, now=now - timedelta(days=1), country="us")   # Sunday: nothing
@@ -813,3 +813,34 @@ def test_weekly_digest_once_per_week(engine):
     assert "▲ **Riser** +50%" in text and "▼ **Faller** -50%" in text
     assert "**Riser** -50%" in text            # on sale now
     assert "Hotfix 1.0.1" in text
+
+
+
+# --------------------------------------------------------------------------- player drops
+
+@pytest.mark.parametrize("latest,history,expected", [
+    (400, [1000] * 7, 1000),        # -60%
+    (600, [1000] * 7, None),        # -40%: not enough
+    (0, [300] * 7, 300),            # outage
+    (40, [100] * 7, None),          # -60% but only 60 players fewer
+    (0, [1000] * 3, None),          # not enough history
+])
+def test_detect_drop(latest, history, expected):
+    assert alerts_mod.detect_drop(latest, history, AlertsConfig()) == expected
+
+
+def test_drop_alert_with_cooldown(engine):
+    now = datetime(2026, 3, 15, 20)
+    _seed_game(engine)
+    rows = [{"appid": 1, "ts": now - timedelta(days=d), "players": 1000} for d in range(1, 10)]
+    rows.append({"appid": 1, "ts": now, "players": 50})
+    db.insert_ignore(engine, db.player_snapshots, rows)
+    cfg = AlertsConfig(sales=False, patches=False, daily_summary=False, review_bombs=False, price_targets=False,
+                       all_time_lows=False, weekly_digest=False)
+    send = FakeSender()
+    alerts_mod.process(engine, cfg, [1], send, now=now)
+    assert send.titles == ["Player drop: Game 1"]
+    assert "Possible server outage" in send.calls[0][0]["description"]
+    alerts_mod.process(engine, cfg, [1], send, now=now + timedelta(hours=1))   # cooldown
+    assert len(send.calls) == 1
+    alerts_mod.process(engine, AlertsConfig(**{**cfg.__dict__, "drops": False}), [1], FakeSender(), now=now)

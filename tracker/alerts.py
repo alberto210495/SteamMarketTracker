@@ -1,7 +1,7 @@
 """Discord alerts, sent at the end of each collection run.
 
 - sales / patches: events created since the last alert (cursor kept in app_state)
-- spikes: latest players vs. the median for the same hour of day over 14 days
+- spikes / drops: latest players vs. the median for the same hour of day over 14 days
 - daily summary: once per UTC day, on the first run at or after the configured hour
 - review bombs: the latest day's new negative reviews far above the usual level
 - price watch: a game at or below its target price, or at its all-time low (once per drop)
@@ -38,7 +38,7 @@ PATCH_KINDS = ("patch",)
 
 COLORS = {  # Discord embed sidebar colours
     "sale_start": 0x1BAF7A, "sale_change": 0x1BAF7A, "sale_end": 0x898781, "price_change": 0xEDA100,
-    "patch": 0x2A78D6, "spike": 0xEB6834, "summary": 0x6250D6, "test": 0x2A78D6, "bomb": 0xE34948,
+    "patch": 0x2A78D6, "spike": 0xEB6834, "drop": 0xE34948, "summary": 0x6250D6, "test": 0x2A78D6, "bomb": 0xE34948,
     "target": 0x1BAF7A, "atl": 0x008300, "digest": 0x6250D6,
 }
 LABELS = {"sale_start": "On sale", "sale_end": "Sale ended", "sale_change": "Discount changed",
@@ -149,7 +149,20 @@ def detect_spike(latest: int, same_hour_history: list[int], cfg: AlertsConfig) -
     return None
 
 
+def detect_drop(latest: int, same_hour_history: list[int], cfg: AlertsConfig) -> float | None:
+    """Returns the usual (median) level if `latest` counts as a drop, else None."""
+    if len(same_hour_history) < SPIKE_MIN_SAMPLES:
+        return None
+    usual = statistics.median(same_hour_history)
+    if usual <= 0:
+        return None
+    if latest <= usual * cfg.drop_ratio and usual - latest >= cfg.drop_min_decrease:
+        return usual
+    return None
+
+
 def spike_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], now: datetime) -> tuple[list[dict], list[str]]:
+    """Spikes and drops (whichever are enabled), with a 24h cooldown per game and direction."""
     t = db.player_snapshots
     names = _names(engine)
     embeds, keys = [], []
@@ -163,21 +176,27 @@ def spike_embeds(engine: Engine, cfg: AlertsConfig, appids: list[int], now: date
                 t.c.appid == appid, t.c.ts >= latest.ts - SPIKE_LOOKBACK, t.c.ts < latest.ts - timedelta(hours=12),
             )).all()
         same_hour = [r.players for r in hist if r.ts.hour == latest.ts.hour]
-        usual = detect_spike(latest.players, same_hour, cfg)
+        usual = detect_spike(latest.players, same_hour, cfg) if cfg.spikes else None
+        kind = "spike"
+        if usual is None and cfg.drops:
+            usual, kind = detect_drop(latest.players, same_hour, cfg), "drop"
         if usual is None:
             continue
-        key = f"alerts.spike.{appid}"
+        key = f"alerts.{kind}.{appid}"
         last = db.get_state(engine, key)
         if last and now - datetime.fromisoformat(last) < SPIKE_COOLDOWN:
             continue
-        embeds.append({
-            "title": f"Player spike: {names.get(appid, appid)}",
-            "description": (f"**{_fmt_int(latest.players)}** players right now, "
-                            f"{latest.players / usual:.1f}× the usual {_fmt_int(usual)} at this hour."),
-            "url": store_url(appid),
-            "color": COLORS["spike"],
-            "timestamp": latest.ts.isoformat() + "Z",
-        })
+        if kind == "spike":
+            title = f"Player spike: {names.get(appid, appid)}"
+            desc = (f"**{_fmt_int(latest.players)}** players right now, "
+                    f"{latest.players / usual:.1f}× the usual {_fmt_int(usual)} at this hour.")
+        else:
+            title = f"Player drop: {names.get(appid, appid)}"
+            desc = (f"**{_fmt_int(latest.players)}** players right now, {(1 - latest.players / usual) * 100:.0f}% "
+                    f"below the usual {_fmt_int(usual)} at this hour."
+                    + (" Possible server outage." if latest.players < usual * 0.1 else ""))
+        embeds.append({"title": title, "description": desc, "url": store_url(appid), "color": COLORS[kind],
+                       "timestamp": latest.ts.isoformat() + "Z"})
         keys.append(key)
     return embeds, keys
 
@@ -420,7 +439,7 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
         log.exception("Event alerts failed")
         stats.failures.append("events")
 
-    if cfg.spikes:
+    if cfg.spikes or cfg.drops:
         try:
             embeds, keys = spike_embeds(engine, cfg, appids, now)
             if embeds and send(embeds):
@@ -497,7 +516,8 @@ def process(engine: Engine, cfg: AlertsConfig, appids: list[int], send: Sender, 
 def send_test(send: Sender) -> bool:
     return send([{
         "title": "Steam Tracker is connected",
-        "description": "Alerts for sales, patches, price targets, player spikes, review bombs, a daily summary and a weekly "
+        "description": "Alerts for sales, patches, price targets, player spikes and drops, review bombs, a daily summary and a "
+                       "weekly "
                        "digest will appear "
                        "in this channel.",
         "color": COLORS["test"],
