@@ -32,7 +32,7 @@ def _reload_tracker_if_changed() -> None:
     stamp = tuple((f.name, f.stat().st_mtime_ns) for f in files)
     if getattr(tracker, "_code_stamp", None) == stamp:
         return
-    for name in ("config", "db", "steam", "analysis"):  # dependency order
+    for name in ("config", "db", "steam", "alerts", "analysis"):  # dependency order
         module = sys.modules.get(f"tracker.{name}")
         if module is not None:
             importlib.reload(module)
@@ -192,6 +192,11 @@ def q_sentiment(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
     return analysis.load_sentiment(_engine_for(url), list(appids))
 
 
+@st.cache_data(ttl=300)
+def q_twitch(url: str, appids: tuple[int, ...]) -> pd.DataFrame:
+    return analysis.load_twitch(_engine_for(url), list(appids))
+
+
 @st.cache_data(ttl=60)
 def q_tracked(url: str) -> list[int] | None:
     """games.toml + dashboard additions - removals; None if the table doesn't exist yet."""
@@ -264,6 +269,8 @@ with st.sidebar:
                                "Daily peak smooths out the day/night cycle.")
     window = st.slider("Impact window (days each side)", 1, 14, 7)
     show_news = st.checkbox("Show non-patch announcements on charts", value=False)
+    show_twitch = st.checkbox("Overlay Twitch viewers on player charts", value=True,
+                              help="Only for games with Twitch data (needs Twitch credentials in the collector).")
     st.caption(f"Data source: {'demo SQLite' if DEMO else DB_URL.split(':', 1)[0].split('+')[0]}")
 
 if not picked:
@@ -277,6 +284,7 @@ events = analysis.to_timezone(q_events(DB_URL, ids), ["ts"], TZ)
 owners = q_owners(DB_URL, ids)
 reviews = q_reviews(DB_URL, ids)
 sentiment = q_sentiment(DB_URL, ids)
+twitch = analysis.to_timezone(q_twitch(DB_URL, ids), ["ts"], TZ)
 # Market = every tracked game, not just the selected ones.
 all_prices = analysis.to_timezone(q_prices(DB_URL, tuple(NAME)), ["ts"], TZ)
 market_sales = analysis.market_sale_periods(all_prices)
@@ -401,7 +409,20 @@ with tab_players:
                     fig.add_vline(x=t, line=dict(color=C["muted"], width=1, dash="dot"))
         else:
             fig.add_annotation(text="No player samples in range", showarrow=False, font=dict(color=C["muted"]))
-        show(style(fig, height=300, y_title="Concurrent players", legend=False), title=NAME[a])
+        tw = in_range(twitch[twitch["appid"] == a]) if show_twitch and not twitch.empty else twitch.iloc[:0]
+        if not tw.empty:
+            if res_key != "hourly":
+                agg = "max" if res_key == "daily_peak" else "mean"
+                tw = tw.set_index("ts")["viewers"].resample("1D").agg(agg).dropna().reset_index()
+            fig.add_trace(go.Scatter(x=tw["ts"], y=tw["viewers"], mode="lines", name="Twitch viewers", yaxis="y2",
+                                     line=dict(color=C["muted"], width=1.5, dash="dot"),
+                                     hovertemplate="%{y:,} Twitch viewers<extra></extra>"))
+        style(fig, height=300, y_title="Concurrent players", legend=False)
+        if not tw.empty:
+            fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False, rangemode="tozero",
+                                          tickfont=dict(color=C["muted"]), title=dict(
+                                              text="Twitch viewers", font=dict(color=C["muted"]))))
+        show(fig, title=NAME[a])
 
 # --------------------------------------------------------------------------- prices
 
@@ -690,6 +711,27 @@ with tab_patterns:
         fig.update_xaxes(showspikes=False, title_text=f"Hour ({TZ_LABEL})", title_font=dict(color=C["muted"]))
         fig.update_yaxes(autorange="reversed", showgrid=False, rangemode=None)
         show(fig, title=f"{NAME[pick]} · weekly rhythm")
+
+    st.subheader("Twitch vs. players")
+    ll = analysis.twitch_lead_lag(players_r, twitch)
+    if ll.empty:
+        st.caption("Needs 3+ days of hourly Twitch data (set `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` "
+                   "for the collector).")
+    else:
+        ll.insert(0, "Game", ll["appid"].map(NAME))
+        ll["Lead"] = ["viewers lead by %dh" % l if l > 0 else ("players lead by %dh" % -l if l < 0 else "same hour")
+                      for l in ll["best_lag_h"]]
+        st.dataframe(ll[["Game", "avg_viewers", "viewers_per_100_players", "Lead", "best_corr", "corr_at_0"]]
+                     .rename(columns={"avg_viewers": "Avg viewers", "viewers_per_100_players": "Viewers per 100 players",
+                                      "best_corr": "Correlation at best lag", "corr_at_0": "Correlation, same hour"}),
+                     hide_index=True, width="stretch",
+                     column_config={"Avg viewers": st.column_config.NumberColumn(format="localized"),
+                                    "Viewers per 100 players": st.column_config.NumberColumn(format="%.1f"),
+                                    "Correlation at best lag": st.column_config.NumberColumn(format="%.2f"),
+                                    "Correlation, same hour": st.column_config.NumberColumn(format="%.2f")})
+        st.caption("Correlates hour-to-hour changes (after removing the daily cycle) of Twitch viewers and players, "
+                   "shifted up to 12 hours. *Viewers lead* with a clear correlation (0.3+) suggests streams "
+                   "drive players, e.g. a big streamer picking the game up. Weak correlations mean no clear link.")
 
 # --------------------------------------------------------------------------- owners
 

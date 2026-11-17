@@ -125,7 +125,14 @@ def generate(engine: Engine, days: int = 90, seed: int = 7) -> None:
             sentiment.append({"appid": appid, "date": day, "total_positive": int(pos_t), "total_negative": int(neg_t),
                               "review_score": 8, "review_score_desc": "Very Positive"})
 
+        twitch, ratio = [], rng.uniform(0.04, 0.12)
+        for i, r in enumerate(players):
+            ahead = players[min(i + 2, len(players) - 1)]["players"]   # streams pick up ~2h before players
+            twitch.append({"appid": appid, "ts": r["ts"], "viewers": int(ahead * ratio * rng.uniform(0.85, 1.15)),
+                           "streams": max(1, int(ahead * ratio / 60)), "twitch_game_id": str(appid)})
+
         db.insert_ignore(engine, db.player_snapshots, players)
+        db.insert_ignore(engine, db.twitch_snapshots, twitch)
         db.insert_ignore(engine, db.price_snapshots, prices)
         db.insert_ignore(engine, db.events, events)
         db.insert_ignore(engine, db.owner_snapshots, owners)

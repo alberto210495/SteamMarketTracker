@@ -692,3 +692,48 @@ def regional_prices(prices: pd.DataFrame, main_country: str, rates: dict[str, fl
     latest["cheapest"] = list(zip(latest["appid"], latest["country"]))
     latest["cheapest"] = latest["cheapest"].isin(set(zip(cheapest["appid"], cheapest["country"])))
     return latest[cols].sort_values(["appid", "country"], ignore_index=True)
+
+
+def load_twitch(engine: Engine, appids: list[int]) -> pd.DataFrame:
+    t = db.twitch_snapshots
+    cols = ["appid", "ts", "viewers", "streams"]
+    try:
+        df = _read(engine, select(t.c.appid, t.c.ts, t.c.viewers, t.c.streams)
+                   .where(t.c.appid.in_(appids)).order_by(t.c.ts))
+    except (OperationalError, ProgrammingError):  # table not created yet
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["ts"] = pd.to_datetime(df["ts"])
+    return df
+
+
+def twitch_lead_lag(players: pd.DataFrame, twitch: pd.DataFrame, max_lag: int = 12,
+                    min_samples: int = 72) -> pd.DataFrame:
+    """Do Twitch viewers move before players? Correlates hour-over-hour changes of
+    viewers shifted by -max_lag..+max_lag hours with player changes. A positive
+    `best_lag_h` means viewer changes come that many hours *before* player changes.
+    Changes are taken after removing each hour-of-day's typical level, so the shared
+    daily cycle doesn't dominate the correlation."""
+    cols = ["appid", "samples", "avg_viewers", "viewers_per_100_players", "best_lag_h", "best_corr", "corr_at_0"]
+    if players.empty or twitch.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for appid, tw in twitch.groupby("appid"):
+        p = players[players["appid"] == appid].set_index("ts")["players"].resample("1h").mean()
+        v = tw.set_index("ts")["viewers"].resample("1h").mean()
+        df = pd.concat({"p": p, "v": v}, axis=1).dropna()
+        if len(df) < min_samples:
+            continue
+        hour = df.index.hour
+        resid = df / df.groupby(hour).transform("mean")
+        d = resid.diff()
+        corrs = {lag: d["p"].corr(d["v"].shift(lag)) for lag in range(-max_lag, max_lag + 1)}
+        corrs = {k: c for k, c in corrs.items() if pd.notna(c)}
+        if not corrs:
+            continue
+        best = max(corrs, key=lambda k: corrs[k])
+        rows.append({"appid": appid, "samples": len(df), "avg_viewers": float(df["v"].mean()),
+                     "viewers_per_100_players": float(df["v"].mean() / df["p"].mean() * 100) if df["p"].mean() else None,
+                     "best_lag_h": best, "best_corr": corrs[best], "corr_at_0": corrs.get(0)})
+    return pd.DataFrame(rows, columns=cols)

@@ -27,6 +27,8 @@ jobs:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}   # Neon PostgreSQL connection string
       STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }} # optional
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}  # optional: alerts
+      TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}          # optional: Twitch viewers
+      TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
     steps:
       - name: Require DATABASE_URL
         if: env.DATABASE_URL == ''

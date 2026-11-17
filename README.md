@@ -57,9 +57,16 @@ frankfurter.app and marks the cheapest region); sales, alerts and charts use `co
 | Owners, positive/negative reviews, playtime | SteamSpy `appdetails` | once per UTC day | Owners is a coarse **range** estimate |
 | Steam review total | storefront `appdetails` (`recommendations.total`) | once per UTC day | New reviews per day = difference between days |
 | Positive / negative reviews | `store.steampowered.com/appreviews` (`query_summary`) | once per UTC day | Steam's own all-language totals; daily differences give the weekly sentiment |
+| Twitch viewers (optional) | Twitch Helix `streams` | every run | Needs `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`; sums the top 1,000 live streams |
 | Name, developer, etc. | storefront `appdetails` | weekly | |
 
 No API key is required. If you set `STEAM_API_KEY` it is sent with Web API calls.
+
+**Twitch (optional):** create an application at [dev.twitch.tv/console](https://dev.twitch.tv/console) (category
+*Analytics Tool*, any OAuth redirect such as `http://localhost`), then add repository secrets `TWITCH_CLIENT_ID` and
+`TWITCH_CLIENT_SECRET`. Games are matched to Twitch categories by name; if a name differs, add
+`twitch_name = "..."` to that game in `games.toml`. The player charts overlay viewers, and the *Patterns* tab shows
+whether viewer changes come before player changes.
 
 Requests are rate-limited (storefront ~1 req/1.6 s, SteamSpy 1 req/s) and retried with backoff on 429/5xx.
 

@@ -19,8 +19,8 @@ from .steam import (PriceInfo, SteamClient, classify_news, parse_owner_range, pa
 log = logging.getLogger(__name__)
 
 METADATA_MAX_AGE = timedelta(days=7)
-ALL_STEPS = ("metadata", "players", "prices", "regional_prices", "news", "owners", "reviews", "sentiment",
-             "alerts")  # alerts run last
+ALL_STEPS = ("metadata", "players", "prices", "regional_prices", "twitch", "news", "owners", "reviews",
+             "sentiment", "alerts")  # alerts run last
 
 
 @dataclass
@@ -32,12 +32,14 @@ class RunStats:
     owners: int = 0
     reviews: int = 0
     sentiment: int = 0
+    twitch: int = 0
     metadata: int = 0
     failures: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         s = (f"players={self.players} prices={self.prices} price_events={self.events} "
              f"news={self.news} owners={self.owners} reviews={self.reviews} sentiment={self.sentiment} "
+             f"twitch={self.twitch} "
              f"metadata={self.metadata}")
         if self.failures:
             s += f" failures={len(self.failures)}"
@@ -228,9 +230,32 @@ def collect_sentiment(engine: Engine, client: SteamClient, appids: list[int], ts
         stats.sentiment += 1
 
 
+def collect_twitch(engine: Engine, twitch, appids: list[int], names: dict[int, str], ts: datetime,
+                   stats: RunStats) -> None:
+    """Live Twitch viewers per game, matched by name (override with `twitch_name` in games.toml)."""
+    from .twitch import clean_game_name
+
+    games = db.game_rows(engine)
+    wanted = {a: names.get(a) or (games.get(a) or {}).get("name") for a in appids}
+    wanted = {a: n for a, n in wanted.items() if n and not n.startswith("App ")}
+    ids = twitch.game_ids(list(wanted.values()))
+    rows = []
+    for appid, name in wanted.items():
+        gid = ids.get(clean_game_name(name).lower())
+        if gid is None:
+            stats.failures.append(f"twitch:{appid}")
+            continue
+        result = twitch.viewers(gid)
+        if result is None:
+            stats.failures.append(f"twitch:{appid}")
+            continue
+        rows.append({"appid": appid, "ts": ts, "viewers": result[0], "streams": result[1], "twitch_game_id": gid})
+    stats.twitch += db.insert_ignore(engine, db.twitch_snapshots, rows)
+
+
 def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         client: SteamClient | None = None, games: config.GamesConfig | None = None,
-        send_alerts=None) -> RunStats:
+        send_alerts=None, twitch=None) -> RunStats:
     """`send_alerts` overrides the Discord sender (tests); by default alerts go to
     DISCORD_WEBHOOK_URL when it's set and are skipped otherwise."""
     engine = engine or db.get_engine()
@@ -254,6 +279,11 @@ def run(steps: tuple[str, ...] = ALL_STEPS, engine: Engine | None = None,
         "reviews": lambda: collect_reviews(engine, client, appids, games.country, ts, stats),
         "sentiment": lambda: collect_sentiment(engine, client, appids, ts, stats),
     }
+    if twitch is None and (creds := config.twitch_credentials()):
+        from .twitch import TwitchClient
+        twitch = TwitchClient(*creds)
+    if twitch is not None:
+        step_fns["twitch"] = lambda: collect_twitch(engine, twitch, appids, games.twitch_names, ts, stats)
     for step in ALL_STEPS:
         if step not in steps or step not in step_fns:
             continue

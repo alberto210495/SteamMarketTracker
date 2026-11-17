@@ -640,3 +640,41 @@ def test_games_toml_extra_countries(tmp_path):
     p = tmp_path / "g.toml"
     p.write_text('country = "us"\nextra_countries = ["GB", "us", "gb", "de"]\n[[games]]\nappid = 1\n')
     assert config.load_games(p).extra_countries == ["gb", "de"]
+
+
+
+# --------------------------------------------------------------------------- twitch
+
+class FakeTwitch:
+    def game_ids(self, names):
+        return {"game 1": "111"}            # Game 2 isn't on Twitch
+
+    def viewers(self, game_id):
+        return (5000, 42)
+
+
+def test_collect_twitch_matches_names(engine, monkeypatch):
+    monkeypatch.setattr(db, "utcnow", lambda: datetime(2026, 1, 1, 10))
+    games = config.GamesConfig(country="us", appids=[1, 2])
+    stats = collect.run(engine=engine, client=FakeClient(), games=games, twitch=FakeTwitch())
+    assert stats.twitch == 1 and "twitch:2" in stats.failures
+    tw = analysis.load_twitch(engine, [1, 2])
+    assert tw.iloc[0]["viewers"] == 5000 and tw.iloc[0]["appid"] == 1
+
+
+def test_twitch_helpers():
+    from tracker.twitch import clean_game_name, sum_streams
+    assert clean_game_name("Counter-Strike™  2") == "Counter-Strike 2"
+    assert sum_streams([{"data": [{"viewer_count": 10}, {"viewer_count": 5}]}, {"data": []}]) == (15, 2)
+
+
+def test_twitch_lead_lag_finds_lead():
+    import numpy as np
+    rng = np.random.default_rng(1)
+    ts = pd.date_range("2026-03-01", periods=24 * 10, freq="h")
+    shocks = rng.normal(0, 0.05, len(ts)).cumsum()
+    level = 1000 * np.exp(shocks)
+    players = pd.DataFrame({"appid": 1, "ts": ts, "players": level})
+    viewers = pd.DataFrame({"appid": 1, "ts": ts, "viewers": np.roll(level, -3) / 10})  # viewers 3h ahead
+    out = analysis.twitch_lead_lag(players, viewers.iloc[:-3]).iloc[0]
+    assert out["best_lag_h"] == 3 and out["best_corr"] > 0.9

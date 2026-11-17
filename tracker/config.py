@@ -37,6 +37,7 @@ class GamesConfig:
     country: str = "us"
     appids: list[int] = field(default_factory=list)
     extra_countries: list[str] = field(default_factory=list)   # price snapshots only, no sale events
+    twitch_names: dict[int, str] = field(default_factory=dict)  # appid -> Twitch category name override
     alerts: "AlertsConfig" = field(default_factory=lambda: AlertsConfig())
 
 
@@ -52,6 +53,12 @@ class AlertsConfig:
     daily_summary_hour_utc: int = 14
     review_bombs: bool = True       # a day with far more negative reviews than usual
     review_bomb_min_negative: int = 30
+
+
+def twitch_credentials() -> tuple[str, str] | None:
+    cid = os.environ.get("TWITCH_CLIENT_ID", "").strip()
+    secret = os.environ.get("TWITCH_CLIENT_SECRET", "").strip()
+    return (cid, secret) if cid and secret else None
 
 
 def discord_webhook_url() -> str | None:
@@ -71,4 +78,5 @@ def load_games(path: Path | None = None) -> GamesConfig:
     country = str(raw.get("country", "us")).lower()
     extra = [str(c).lower() for c in raw.get("extra_countries") or []]
     extra = [c for i, c in enumerate(extra) if c != country and c not in extra[:i]]
-    return GamesConfig(country=country, appids=appids, alerts=alerts, extra_countries=extra)
+    twitch = {int(g["appid"]): str(g["twitch_name"]) for g in raw.get("games", []) if g.get("twitch_name")}
+    return GamesConfig(country=country, appids=appids, alerts=alerts, extra_countries=extra, twitch_names=twitch)

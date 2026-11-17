@@ -119,6 +119,17 @@ review_score_snapshots = Table(
     Column("review_score_desc", String(64)),
 )
 
+# Hourly Twitch viewers per game (sum over live streams; optional, needs Twitch credentials).
+twitch_snapshots = Table(
+    "twitch_snapshots",
+    metadata,
+    Column("appid", Integer, primary_key=True),
+    Column("ts", DateTime, primary_key=True),
+    Column("viewers", Integer, nullable=False),
+    Column("streams", Integer, nullable=False),
+    Column("twitch_game_id", String(32)),
+)
+
 # Games added or removed from the dashboard. Combined with games.toml:
 # tracked = games.toml + active rows here - rows here with active = false.
 # The dashboard's read-only role is granted INSERT/UPDATE on this table only.
@@ -252,7 +263,7 @@ def copy_database(src: Engine, dst: Engine, chunk: int = 2000) -> dict[str, int]
     stays consistent; events dedupe on (appid, kind, source_id)."""
     counts: dict[str, int] = {}
     for table in (games, player_snapshots, price_snapshots, owner_snapshots, review_snapshots,
-                  review_score_snapshots, tracked_games, events):
+                  review_score_snapshots, twitch_snapshots, tracked_games, events):
         cols = [c for c in table.columns if not (table is events and c.name == "id")]
         n = 0
         with src.connect() as conn:
